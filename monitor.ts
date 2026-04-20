@@ -1,4 +1,4 @@
-import type { Event, EventSessionCreated } from "@opencode-ai/sdk";
+import type { Event, EventSessionCreated, EventSessionDeleted } from "@opencode-ai/sdk";
 import { tool, type Plugin } from "@opencode-ai/plugin";
 
 import { MonitorManager, resolveRootSessionID } from "./lib/runtime.ts";
@@ -19,6 +19,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
         path: { id: sessionID },
         body: { parts: [{ type: "text", text }] },
         url: "/session/{id}/prompt_async",
+        throwOnError: true,
       });
     },
     getRootSessionID: async (sessionID) => resolveRootSessionID(ctx.client as any, sessionID),
@@ -46,7 +47,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
                 tool.schema.object({ type: tool.schema.literal("idle") }),
                 tool.schema.object({
                   type: tool.schema.literal("interval"),
-                  everyMs: tool.schema.number(),
+                  everyMs: tool.schema.number().positive(),
                   offsetMs: tool.schema.number().optional(),
                   deliverWhenEmpty: tool.schema.boolean().optional(),
                   instantWhenIdle: tool.schema.boolean().optional(),
@@ -115,7 +116,8 @@ export const MonitorPlugin: Plugin = async (ctx) => {
         return;
       }
       if (event.type === "session.deleted") {
-        await manager.deleteSession(event.properties.sessionID);
+        const deletedSessionID = manager.rememberSessionDeleted(event as EventSessionDeleted);
+        await manager.deleteSession(deletedSessionID);
         return;
       }
       if (event.type === "session.status") {

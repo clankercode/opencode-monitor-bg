@@ -201,4 +201,31 @@ describe("runtime", () => {
     expect(batches).toHaveLength(1);
     expect(batches[0]?.lines[0]?.content).toBe("hello");
   });
+
+  test("fetchPending is serialized with runtime state access", async () => {
+    const fakeChild = createFakeChild();
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-7",
+      promptAsync: async () => {},
+      getRootSessionID: async () => "root-7",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-7",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "line", windowMs: 60_000 }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    fakeChild.stdout.emit("data", Buffer.from("hello\nworld\n"));
+    const first = await manager.fetchPending("root-7", "server");
+    const second = await manager.fetchPending("root-7", "server");
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(0);
+  });
 });

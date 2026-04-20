@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { mkdirSync, readdirSync, rmSync, statSync, createWriteStream, type WriteStream } from "fs";
 import path from "path";
 
-import type { EventSessionCreated, Session } from "@opencode-ai/sdk";
+import type { EventSessionCreated, EventSessionDeleted, Session } from "@opencode-ai/sdk";
 
 import { commitDelivery, decideLineEvent, decideManualFetch, decideTimeEvent } from "./core.ts";
 import { allocateMonitorId } from "./ids.ts";
@@ -109,9 +109,16 @@ export class MonitorManager {
   }
 
   rememberSessionCreated(event: EventSessionCreated): void {
-    const sessionID = event.properties.sessionID;
-    const parentID = event.properties.parentID ?? undefined;
+    const sessionID = event.properties.info.id;
+    const parentID = event.properties.info.parentID ?? undefined;
     this.sessionRoots.set(sessionID, parentID ?? sessionID);
+  }
+
+  rememberSessionDeleted(event: EventSessionDeleted): string {
+    const sessionID = event.properties.info.id;
+    const parentID = event.properties.info.parentID ?? undefined;
+    if (parentID) this.sessionRoots.set(sessionID, parentID);
+    return sessionID;
   }
 
   setSessionIdle(sessionID: string, idle: boolean): void {
@@ -199,14 +206,16 @@ export class MonitorManager {
     const values = label ? [monitors.get(label)].filter(Boolean) as RuntimeMonitor[] : Array.from(monitors.values());
     const batches: DeliveryBatch[] = [];
     for (const monitor of values) {
-      const decision = decideManualFetch(monitor.scheduler);
-      if (!decision.deliverNow) continue;
-      const committed = commitDelivery({ state: monitor.scheduler, monitorId: monitor.record.monitorId });
-      monitor.scheduler = committed.state;
-      monitor.record.nextSeq = committed.state.nextSeq;
-      monitor.record.pendingLines = committed.state.pendingLines;
-      monitor.record.pendingExit = committed.state.pendingExit;
-      batches.push(committed.batch);
+      await this.serializedDrain(monitor, async () => {
+        const decision = decideManualFetch(monitor.scheduler);
+        if (!decision.deliverNow) return;
+        const committed = commitDelivery({ state: monitor.scheduler, monitorId: monitor.record.monitorId });
+        monitor.scheduler = committed.state;
+        monitor.record.nextSeq = committed.state.nextSeq;
+        monitor.record.pendingLines = committed.state.pendingLines;
+        monitor.record.pendingExit = committed.state.pendingExit;
+        batches.push(committed.batch);
+      });
     }
     return batches;
   }
@@ -239,6 +248,7 @@ export class MonitorManager {
     if (!monitors) return;
     for (const monitor of monitors.values()) this.killProcessTree(monitor, "SIGTERM");
     this.bySession.delete(rootSessionID);
+    this.sessionRoots.delete(rootSessionID);
   }
 
   private attachProcess(runtime: RuntimeMonitor): void {
@@ -360,6 +370,7 @@ export class MonitorManager {
     }
     for (const timer of runtime.intervalTimers) this.clearTimer(timer);
     runtime.intervalTimers = [];
+    runtime.logStream.end();
     const pid = runtime.process.pid;
     if (!pid) return;
     try {
@@ -393,13 +404,16 @@ export class MonitorManager {
   private setupIntervalTimers(runtime: RuntimeMonitor): void {
     const intervalTriggers = runtime.record.triggers.filter((trigger) => trigger.type === "interval");
     for (const trigger of intervalTriggers) {
+      if (trigger.everyMs <= 0) continue;
       const schedule = () => {
+        if (runtime.destroyed) return;
         const now = this.now();
         const offsetMs = trigger.offsetMs ?? 0;
         const elapsed = Math.max(0, now - offsetMs);
         const remainder = elapsed % trigger.everyMs;
         const delay = now < offsetMs ? offsetMs - now : remainder === 0 ? trigger.everyMs : trigger.everyMs - remainder;
         const handle = this.setTimer(() => {
+          runtime.intervalTimers = runtime.intervalTimers.filter((timer) => timer !== handle);
           void this.tryAutoDeliver(runtime, "interval").finally(schedule);
         }, delay);
         runtime.intervalTimers.push(handle);
