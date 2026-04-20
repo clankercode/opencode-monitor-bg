@@ -62,6 +62,7 @@ type RuntimeMonitor = {
   stdoutCollector: LineCollectorState;
   stderrCollector: LineCollectorState;
   logStream: WriteStream;
+  logFailed: boolean;
   draining: Promise<void> | null;
   destroyed: boolean;
   closed: boolean;
@@ -179,6 +180,7 @@ export class MonitorManager {
       stdoutCollector: { remainder: "" },
       stderrCollector: { remainder: "" },
       logStream: createWriteStream(logPath, { flags: "a" }),
+      logFailed: false,
       draining: null,
       destroyed: false,
       closed: false,
@@ -186,6 +188,10 @@ export class MonitorManager {
       debounceTimer: null,
       intervalTimers: [],
     };
+
+    runtime.logStream.on("error", () => {
+      runtime.logFailed = true;
+    });
 
     this.attachProcess(runtime);
     this.setupIntervalTimers(runtime);
@@ -315,7 +321,9 @@ export class MonitorManager {
     };
     runtime.scheduler.pendingLines = [...runtime.scheduler.pendingLines, line];
     runtime.record.pendingLines = runtime.scheduler.pendingLines;
-    runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}\n`);
+    if (!runtime.logFailed) {
+      runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}\n`);
+    }
 
     const decision = decideLineEvent({
       state: runtime.scheduler,
@@ -329,7 +337,10 @@ export class MonitorManager {
       runtime.scheduler.debounceUntil = decision.debounceUntil;
       this.scheduleDebounce(runtime, decision.debounceUntil - this.now());
     }
-    if (decision.deliverNow) this.fireAndForgetDeliver(runtime, decision.reason ?? "line");
+    if (decision.deliverNow) {
+      const reason = decision.reason === "fetch" ? "line" : (decision.reason ?? "line");
+      this.fireAndForgetDeliver(runtime, reason);
+    }
   }
 
   private async tryAutoDeliver(runtime: RuntimeMonitor, reason: "line" | "idle" | "interval" | "exit"): Promise<void> {

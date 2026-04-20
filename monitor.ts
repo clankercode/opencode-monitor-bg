@@ -37,7 +37,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
           label: tool.schema.string().describe("Unique monitor label within the root session"),
           capture: tool.schema.enum(["stdout", "stderr", "both"]).default("both"),
           cwd: tool.schema.string().optional(),
-          env: tool.schema.record(tool.schema.string()).optional(),
+          env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional(),
           tagTemplate: tool.schema.string().default("monitor_{id}"),
           requestedId: tool.schema.string().optional(),
           triggers: tool.schema
@@ -63,7 +63,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
             command: args.command,
             capture: args.capture,
             cwd: args.cwd ?? context.directory,
-            env: args.env,
+            env: args.env as Record<string, string> | undefined,
             triggers: args.triggers,
             tagTemplate: args.tagTemplate,
             requestedId: args.requestedId,
@@ -121,7 +121,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
         return;
       }
       if (event.type === "session.status") {
-        const idle = event.properties.status === "idle";
+        const idle = event.properties.status.type === "idle";
         if (idle) await manager.handleIdle(event.properties.sessionID);
         else await manager.handleActivity(event.properties.sessionID);
       }

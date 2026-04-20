@@ -29,7 +29,7 @@ export function primeQueue(primeState: PrimeState, count: number): { queue: numb
 
 function shiftPrime(primeState: PrimeState): { prime: number; state: PrimeState } {
   const filled = primeQueue(primeState, 1);
-  const [prime, ...rest] = filled.queue;
+  const [prime, ...rest] = filled.queue as [number, ...number[]];
   return {
     prime,
     state: {

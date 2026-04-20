@@ -12621,6 +12621,7 @@ class MonitorManager {
       stdoutCollector: { remainder: "" },
       stderrCollector: { remainder: "" },
       logStream: createWriteStream(logPath, { flags: "a" }),
+      logFailed: false,
       draining: null,
       destroyed: false,
       closed: false,
@@ -12628,6 +12629,9 @@ class MonitorManager {
       debounceTimer: null,
       intervalTimers: []
     };
+    runtime.logStream.on("error", () => {
+      runtime.logFailed = true;
+    });
     this.attachProcess(runtime);
     this.setupIntervalTimers(runtime);
     existing.set(input.label, runtime);
@@ -12752,8 +12756,10 @@ class MonitorManager {
     };
     runtime.scheduler.pendingLines = [...runtime.scheduler.pendingLines, line];
     runtime.record.pendingLines = runtime.scheduler.pendingLines;
-    runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}
+    if (!runtime.logFailed) {
+      runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}
 `);
+    }
     const decision = decideLineEvent({
       state: runtime.scheduler,
       line,
@@ -12765,8 +12771,10 @@ class MonitorManager {
       runtime.scheduler.debounceUntil = decision.debounceUntil;
       this.scheduleDebounce(runtime, decision.debounceUntil - this.now());
     }
-    if (decision.deliverNow)
-      this.fireAndForgetDeliver(runtime, decision.reason ?? "line");
+    if (decision.deliverNow) {
+      const reason = decision.reason === "fetch" ? "line" : decision.reason ?? "line";
+      this.fireAndForgetDeliver(runtime, reason);
+    }
   }
   async tryAutoDeliver(runtime, reason) {
     await this.serializedDrain(runtime, async () => {
@@ -12975,7 +12983,7 @@ var MonitorPlugin = async (ctx) => {
           label: tool.schema.string().describe("Unique monitor label within the root session"),
           capture: tool.schema.enum(["stdout", "stderr", "both"]).default("both"),
           cwd: tool.schema.string().optional(),
-          env: tool.schema.record(tool.schema.string()).optional(),
+          env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional(),
           tagTemplate: tool.schema.string().default("monitor_{id}"),
           requestedId: tool.schema.string().optional(),
           triggers: tool.schema.array(tool.schema.union([
@@ -13056,7 +13064,7 @@ var MonitorPlugin = async (ctx) => {
         return;
       }
       if (event.type === "session.status") {
-        const idle = event.properties.status === "idle";
+        const idle = event.properties.status.type === "idle";
         if (idle)
           await manager.handleIdle(event.properties.sessionID);
         else
