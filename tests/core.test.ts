@@ -84,6 +84,44 @@ describe("core", () => {
     expect(decision.reason).toBe("interval");
   });
 
+  test("interval trigger tolerates small timer jitter for pending output", () => {
+    const decision = decideTimeEvent({
+      state: makeSchedulerState({ pendingLines: makeLines(1) }),
+      triggers: [{ type: "interval", everyMs: 1_000 }],
+      sessionIsIdle: false,
+      now: 2_003,
+      kind: "interval",
+    });
+
+    expect(decision.deliverNow).toBeTrue();
+    expect(decision.reason).toBe("interval");
+  });
+
+  test("interval trigger tolerates small timer jitter for empty heartbeat", () => {
+    const decision = decideTimeEvent({
+      state: makeSchedulerState(),
+      triggers: [{ type: "interval", everyMs: 1_000, deliverWhenEmpty: true }],
+      sessionIsIdle: false,
+      now: 2_003,
+      kind: "interval",
+    });
+
+    expect(decision.deliverNow).toBeTrue();
+    expect(decision.reason).toBe("interval");
+  });
+
+  test("interval trigger does not fire far from its schedule", () => {
+    const decision = decideTimeEvent({
+      state: makeSchedulerState({ pendingLines: makeLines(1) }),
+      triggers: [{ type: "interval", everyMs: 1_000 }],
+      sessionIsIdle: false,
+      now: 2_250,
+      kind: "interval",
+    });
+
+    expect(decision.deliverNow).toBeFalse();
+  });
+
   test("exit-only delivery happens with no pending lines", () => {
     const decision = decideTimeEvent({
       state: makeSchedulerState({ pendingExit: makeExit() }),

@@ -46,10 +46,12 @@ export function decideTimeEvent(input: {
     for (const trigger of intervalTriggers) {
       const offsetMs = trigger.offsetMs ?? 0;
       if (input.now < offsetMs) continue;
-      if ((input.now - offsetMs) % trigger.everyMs === 0) {
-        if (hasPending(input.state) || trigger.deliverWhenEmpty) {
-          return { deliverNow: true, reason: "interval" };
-        }
+      const elapsed = input.now - offsetMs;
+      const remainder = elapsed % trigger.everyMs;
+      const nearBoundary = remainder <= 5 || trigger.everyMs - remainder <= 5;
+      if (!nearBoundary) continue;
+      if (hasPending(input.state) || trigger.deliverWhenEmpty) {
+        return { deliverNow: true, reason: "interval" };
       }
     }
   }
