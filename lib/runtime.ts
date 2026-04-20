@@ -64,6 +64,7 @@ type RuntimeMonitor = {
   logStream: WriteStream;
   draining: Promise<void> | null;
   destroyed: boolean;
+  closed: boolean;
   debounceTimer: TimerHandle | null;
   intervalTimers: TimerHandle[];
 };
@@ -111,14 +112,14 @@ export class MonitorManager {
   rememberSessionCreated(event: EventSessionCreated): void {
     const sessionID = event.properties.info.id;
     const parentID = event.properties.info.parentID ?? undefined;
-    this.sessionRoots.set(sessionID, parentID ?? sessionID);
+    this.sessionRoots.set(sessionID, parentID ? this.sessionRoots.get(parentID) ?? parentID : sessionID);
   }
 
-  rememberSessionDeleted(event: EventSessionDeleted): string {
+  rememberSessionDeleted(event: EventSessionDeleted): { sessionID: string; isRoot: boolean } {
     const sessionID = event.properties.info.id;
-    const parentID = event.properties.info.parentID ?? undefined;
-    if (parentID) this.sessionRoots.set(sessionID, parentID);
-    return sessionID;
+    const isRoot = !event.properties.info.parentID;
+    this.sessionRoots.delete(sessionID);
+    return { sessionID, isRoot };
   }
 
   setSessionIdle(sessionID: string, idle: boolean): void {
@@ -179,6 +180,7 @@ export class MonitorManager {
       logStream: createWriteStream(logPath, { flags: "a" }),
       draining: null,
       destroyed: false,
+      closed: false,
       debounceTimer: null,
       intervalTimers: [],
     };
@@ -214,6 +216,7 @@ export class MonitorManager {
         monitor.record.nextSeq = committed.state.nextSeq;
         monitor.record.pendingLines = committed.state.pendingLines;
         monitor.record.pendingExit = committed.state.pendingExit;
+        this.finalizeCompletedRuntime(monitor);
         batches.push(committed.batch);
       });
     }
@@ -224,8 +227,9 @@ export class MonitorManager {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     const monitor = this.bySession.get(rootSessionID)?.get(label);
     if (!monitor) throw new Error(`Unknown monitor '${label}'.`);
-    this.killProcessTree(monitor, signal);
     monitor.record.status = "killed";
+    this.killProcessTree(monitor, signal);
+    this.removeRuntime(monitor);
     return this.toSummary(monitor);
   }
 
@@ -247,7 +251,7 @@ export class MonitorManager {
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors) return;
     for (const monitor of monitors.values()) this.killProcessTree(monitor, "SIGTERM");
-    this.bySession.delete(rootSessionID);
+    for (const monitor of monitors.values()) this.removeRuntime(monitor);
     this.sessionRoots.delete(rootSessionID);
   }
 
@@ -268,6 +272,13 @@ export class MonitorManager {
     });
 
     runtime.process.on("close", (code, signal) => {
+      this.clearScheduledTimers(runtime);
+      this.closeLogStream(runtime);
+      if (runtime.destroyed) {
+        this.removeRuntime(runtime);
+        return;
+      }
+
       const stdoutFlushed = flushRemainder(runtime.stdoutCollector);
       runtime.stdoutCollector = stdoutFlushed.state;
       onLines("stdout", stdoutFlushed.lines);
@@ -282,6 +293,7 @@ export class MonitorManager {
         occurredAt: this.now(),
       };
       runtime.record.pendingExit = runtime.scheduler.pendingExit;
+      runtime.record.pendingLines = runtime.scheduler.pendingLines;
       void this.tryAutoDeliver(runtime, "exit");
     });
   }
@@ -346,6 +358,7 @@ export class MonitorManager {
         runtime.record.nextSeq = committed.state.nextSeq;
         runtime.record.pendingLines = committed.state.pendingLines;
         runtime.record.pendingExit = committed.state.pendingExit;
+        this.finalizeCompletedRuntime(runtime);
       } catch {
         runtime.scheduler = before;
         runtime.record.pendingLines = before.pendingLines;
@@ -364,13 +377,9 @@ export class MonitorManager {
   }
 
   private killProcessTree(runtime: RuntimeMonitor, signal: NodeJS.Signals): void {
-    if (runtime.debounceTimer) {
-      this.clearTimer(runtime.debounceTimer);
-      runtime.debounceTimer = null;
-    }
-    for (const timer of runtime.intervalTimers) this.clearTimer(timer);
-    runtime.intervalTimers = [];
-    runtime.logStream.end();
+    runtime.destroyed = true;
+    this.clearScheduledTimers(runtime);
+    this.closeLogStream(runtime);
     const pid = runtime.process.pid;
     if (!pid) return;
     try {
@@ -406,7 +415,7 @@ export class MonitorManager {
     for (const trigger of intervalTriggers) {
       if (trigger.everyMs <= 0) continue;
       const schedule = () => {
-        if (runtime.destroyed) return;
+        if (runtime.destroyed || runtime.closed) return;
         const now = this.now();
         const offsetMs = trigger.offsetMs ?? 0;
         const elapsed = Math.max(0, now - offsetMs);
@@ -423,11 +432,51 @@ export class MonitorManager {
   }
 
   private async resolveRootSessionID(sessionID: string): Promise<string> {
-    const cached = this.sessionRoots.get(sessionID);
-    if (cached) return cached;
+    const seen = new Set<string>();
+    let current = sessionID;
+    while (!seen.has(current)) {
+      seen.add(current);
+      const cached = this.sessionRoots.get(current);
+      if (!cached) break;
+      if (cached === current) return current;
+      current = cached;
+    }
     const resolved = await this.getRootSessionID(sessionID);
     this.sessionRoots.set(sessionID, resolved);
+    this.sessionRoots.set(resolved, resolved);
     return resolved;
+  }
+
+  private clearScheduledTimers(runtime: RuntimeMonitor): void {
+    if (runtime.debounceTimer) {
+      this.clearTimer(runtime.debounceTimer);
+      runtime.debounceTimer = null;
+    }
+    for (const timer of runtime.intervalTimers) this.clearTimer(timer);
+    runtime.intervalTimers = [];
+  }
+
+  private closeLogStream(runtime: RuntimeMonitor): void {
+    if (runtime.closed) return;
+    runtime.closed = true;
+    runtime.logStream.end();
+  }
+
+  private finalizeCompletedRuntime(runtime: RuntimeMonitor): void {
+    if (runtime.record.status === "running") return;
+    if (runtime.scheduler.pendingLines.length > 0) return;
+    if (runtime.scheduler.pendingExit) return;
+    this.removeRuntime(runtime);
+  }
+
+  private removeRuntime(runtime: RuntimeMonitor): void {
+    if (runtime.destroyed && !this.bySession.get(runtime.record.ownerSessionID)?.has(runtime.record.label)) return;
+    runtime.destroyed = true;
+    this.clearScheduledTimers(runtime);
+    this.closeLogStream(runtime);
+    const monitors = this.bySession.get(runtime.record.ownerSessionID);
+    monitors?.delete(runtime.record.label);
+    if (monitors && monitors.size === 0) this.bySession.delete(runtime.record.ownerSessionID);
   }
 
   private toSummary(runtime: RuntimeMonitor): MonitorSummary {

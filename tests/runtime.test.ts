@@ -47,6 +47,42 @@ describe("runtime", () => {
     expect(listed[0]?.ownerSessionID).toBe("root-1");
   });
 
+  test("multi-level cached session ancestry still resolves to root", async () => {
+    const fakeChild = createFakeChild();
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-1b",
+      promptAsync: async () => {},
+      getRootSessionID: async () => "root-1b",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    manager.rememberSessionCreated({
+      type: "session.created",
+      properties: { info: { id: "root-1b" } },
+    } as any);
+    manager.rememberSessionCreated({
+      type: "session.created",
+      properties: { info: { id: "child-1b", parentID: "root-1b" } },
+    } as any);
+    manager.rememberSessionCreated({
+      type: "session.created",
+      properties: { info: { id: "grandchild-1b", parentID: "child-1b" } },
+    } as any);
+
+    const start = await manager.startMonitor({
+      ownerSessionID: "grandchild-1b",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    expect(start.ownerSessionID).toBe("root-1b");
+  });
+
   test("fetchPending returns pending state without injection", async () => {
     const fakeChild = createFakeChild();
     const promptAsync = mock(async () => {});
@@ -137,6 +173,43 @@ describe("runtime", () => {
     expect(killed.length).toBeGreaterThanOrEqual(1);
   });
 
+  test("deleting a child session does not tear down root-owned monitors", async () => {
+    const fakeChild = createFakeChild();
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-4b",
+      promptAsync: async () => {},
+      getRootSessionID: async (sessionID) => (sessionID === "child-4b" ? "root-4b" : sessionID),
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    manager.rememberSessionCreated({
+      type: "session.created",
+      properties: { info: { id: "root-4b" } },
+    } as any);
+    manager.rememberSessionCreated({
+      type: "session.created",
+      properties: { info: { id: "child-4b", parentID: "root-4b" } },
+    } as any);
+
+    await manager.startMonitor({
+      ownerSessionID: "root-4b",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    const deleted = manager.rememberSessionDeleted({
+      type: "session.deleted",
+      properties: { info: { id: "child-4b", parentID: "root-4b" } },
+    } as any);
+    expect(deleted.isRoot).toBeFalse();
+    expect(await manager.listMonitors("root-4b")).toHaveLength(1);
+  });
+
   test("line debounce schedules later delivery with fake timer", async () => {
     const fakeChild = createFakeChild();
     const timers: Array<() => void> = [];
@@ -200,6 +273,48 @@ describe("runtime", () => {
     const batches = await manager.fetchPending("root-6", "server");
     expect(batches).toHaveLength(1);
     expect(batches[0]?.lines[0]?.content).toBe("hello");
+  });
+
+  test("natural exit cleans up runtime and frees label for restart", async () => {
+    const firstChild = createFakeChild(20001);
+    const secondChild = createFakeChild(20002);
+    let spawnCount = 0;
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-8",
+      promptAsync: async () => {},
+      getRootSessionID: async () => "root-8",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => {
+        spawnCount += 1;
+        return (spawnCount === 1 ? firstChild : secondChild) as any;
+      }) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-8",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    firstChild.emit("close", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await manager.listMonitors("root-8")).toHaveLength(0);
+
+    await manager.startMonitor({
+      ownerSessionID: "root-8",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    expect(await manager.listMonitors("root-8")).toHaveLength(1);
   });
 
   test("fetchPending is serialized with runtime state access", async () => {

@@ -116,8 +116,8 @@ export const MonitorPlugin: Plugin = async (ctx) => {
         return;
       }
       if (event.type === "session.deleted") {
-        const deletedSessionID = manager.rememberSessionDeleted(event as EventSessionDeleted);
-        await manager.deleteSession(deletedSessionID);
+        const deleted = manager.rememberSessionDeleted(event as EventSessionDeleted);
+        if (deleted.isRoot) await manager.deleteSession(deleted.sessionID);
         return;
       }
       if (event.type === "session.status") {
