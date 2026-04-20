@@ -12804,11 +12804,12 @@ class MonitorManager {
   }
   async serializedDrain(runtime, work) {
     const prior = runtime.draining ?? Promise.resolve();
-    runtime.draining = prior.then(work, work).finally(() => {
-      if (runtime.draining === prior)
+    const current = prior.then(work, work).finally(() => {
+      if (runtime.draining === current)
         runtime.draining = null;
     });
-    await runtime.draining;
+    runtime.draining = current;
+    await current;
   }
   killProcessTree(runtime, signal) {
     runtime.destroyed = true;

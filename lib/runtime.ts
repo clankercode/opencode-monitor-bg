@@ -376,10 +376,11 @@ export class MonitorManager {
 
   private async serializedDrain(runtime: RuntimeMonitor, work: () => Promise<void>): Promise<void> {
     const prior = runtime.draining ?? Promise.resolve();
-    runtime.draining = prior.then(work, work).finally(() => {
-      if (runtime.draining === prior) runtime.draining = null;
+    const current = prior.then(work, work).finally(() => {
+      if (runtime.draining === current) runtime.draining = null;
     });
-    await runtime.draining;
+    runtime.draining = current;
+    await current;
   }
 
   private killProcessTree(runtime: RuntimeMonitor, signal: NodeJS.Signals): void {

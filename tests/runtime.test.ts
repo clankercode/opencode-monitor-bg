@@ -412,4 +412,34 @@ describe("runtime", () => {
     expect(first).toHaveLength(1);
     expect(second).toHaveLength(0);
   });
+
+  test("serialized drain clears runtime queue after successful work", async () => {
+    const fakeChild = createFakeChild();
+    const promptAsync = mock(async () => {});
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-10",
+      promptAsync,
+      getRootSessionID: async () => "root-10",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-10",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    fakeChild.stdout.emit("data", Buffer.from("hello\n"));
+    await manager.handleIdle("root-10");
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+
+    fakeChild.stdout.emit("data", Buffer.from("world\n"));
+    await manager.handleIdle("root-10");
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+  });
 });
