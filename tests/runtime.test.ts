@@ -169,6 +169,10 @@ describe("runtime", () => {
     });
 
     await manager.deleteSession("root-4");
+    expect(await manager.listMonitors("root-4")).toHaveLength(1);
+
+    fakeChild.emit("close", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await manager.listMonitors("root-4")).toEqual([]);
     expect(killed.length).toBeGreaterThanOrEqual(1);
   });
@@ -245,6 +249,42 @@ describe("runtime", () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
+  test("background debounce delivery swallows promptAsync rejection and preserves pending output", async () => {
+    const fakeChild = createFakeChild();
+    const timers: Array<() => void> = [];
+    const promptAsync = mock(async () => {
+      throw new Error("boom");
+    });
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-5b",
+      promptAsync,
+      getRootSessionID: async () => "root-5b",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+      setTimer: ((callback: () => void) => {
+        timers.push(callback);
+        return timers.length as any;
+      }) as any,
+      clearTimer: (() => {}) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-5b",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "line", windowMs: 5_000 }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    fakeChild.stdout.emit("data", Buffer.from("hello\n"));
+    await timers[0]?.();
+    const batches = await manager.fetchPending("root-5b", "server");
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.lines[0]?.content).toBe("hello");
+  });
+
   test("promptAsync failure keeps pending data available for fetch", async () => {
     const fakeChild = createFakeChild();
     const promptAsync = mock(async () => {
@@ -315,6 +355,35 @@ describe("runtime", () => {
     });
 
     expect(await manager.listMonitors("root-8")).toHaveLength(1);
+  });
+
+  test("deleteSession waits for close before final removal", async () => {
+    const fakeChild = createFakeChild(20003);
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-9",
+      promptAsync: async () => {},
+      getRootSessionID: async () => "root-9",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-9",
+      label: "server",
+      command: "ignored",
+      capture: "stdout",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "monitor_{id}",
+    });
+
+    await manager.deleteSession("root-9");
+    fakeChild.stdout.emit("data", Buffer.from("late shutdown line\n"));
+    expect(await manager.listMonitors("root-9")).toHaveLength(1);
+
+    fakeChild.emit("close", 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await manager.listMonitors("root-9")).toHaveLength(0);
   });
 
   test("fetchPending is serialized with runtime state access", async () => {

@@ -12624,6 +12624,7 @@ class MonitorManager {
       draining: null,
       destroyed: false,
       closed: false,
+      removalPending: false,
       debounceTimer: null,
       intervalTimers: []
     };
@@ -12670,8 +12671,8 @@ class MonitorManager {
     if (!monitor)
       throw new Error(`Unknown monitor '${label}'.`);
     monitor.record.status = "killed";
+    monitor.removalPending = true;
     this.killProcessTree(monitor, signal);
-    this.removeRuntime(monitor);
     return this.toSummary(monitor);
   }
   async handleIdle(sessionID) {
@@ -12691,10 +12692,11 @@ class MonitorManager {
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors)
       return;
-    for (const monitor of monitors.values())
+    for (const monitor of monitors.values()) {
+      monitor.record.status = "killed";
+      monitor.removalPending = true;
       this.killProcessTree(monitor, "SIGTERM");
-    for (const monitor of monitors.values())
-      this.removeRuntime(monitor);
+    }
     this.sessionRoots.delete(rootSessionID);
   }
   attachProcess(runtime) {
@@ -12714,8 +12716,8 @@ class MonitorManager {
     });
     runtime.process.on("close", (code, signal) => {
       this.clearScheduledTimers(runtime);
-      this.closeLogStream(runtime);
-      if (runtime.destroyed) {
+      if (runtime.removalPending) {
+        this.closeLogStream(runtime);
         this.removeRuntime(runtime);
         return;
       }
@@ -12733,10 +12735,12 @@ class MonitorManager {
       };
       runtime.record.pendingExit = runtime.scheduler.pendingExit;
       runtime.record.pendingLines = runtime.scheduler.pendingLines;
-      this.tryAutoDeliver(runtime, "exit");
+      this.fireAndForgetDeliver(runtime, "exit");
     });
   }
   ingestLine(runtime, stream, content) {
+    if (runtime.closed || runtime.removalPending)
+      return;
     if (runtime.record.capture === "stdout" && stream !== "stdout")
       return;
     if (runtime.record.capture === "stderr" && stream !== "stderr")
@@ -12762,7 +12766,7 @@ class MonitorManager {
       this.scheduleDebounce(runtime, decision.debounceUntil - this.now());
     }
     if (decision.deliverNow)
-      this.tryAutoDeliver(runtime, decision.reason ?? "line");
+      this.fireAndForgetDeliver(runtime, decision.reason ?? "line");
   }
   async tryAutoDeliver(runtime, reason) {
     await this.serializedDrain(runtime, async () => {
@@ -12809,7 +12813,6 @@ class MonitorManager {
   killProcessTree(runtime, signal) {
     runtime.destroyed = true;
     this.clearScheduledTimers(runtime);
-    this.closeLogStream(runtime);
     const pid = runtime.process.pid;
     if (!pid)
       return;
@@ -12835,7 +12838,7 @@ class MonitorManager {
       this.clearTimer(runtime.debounceTimer);
     runtime.debounceTimer = this.setTimer(() => {
       runtime.debounceTimer = null;
-      this.tryAutoDeliver(runtime, "line");
+      this.fireAndForgetDeliver(runtime, "line");
     }, Math.max(0, delay));
   }
   setupIntervalTimers(runtime) {
@@ -12853,7 +12856,8 @@ class MonitorManager {
         const delay = now < offsetMs ? offsetMs - now : remainder === 0 ? trigger.everyMs : trigger.everyMs - remainder;
         const handle = this.setTimer(() => {
           runtime.intervalTimers = runtime.intervalTimers.filter((timer) => timer !== handle);
-          this.tryAutoDeliver(runtime, "interval").finally(schedule);
+          this.fireAndForgetDeliver(runtime, "interval");
+          schedule();
         }, delay);
         runtime.intervalTimers.push(handle);
       };
@@ -12900,6 +12904,9 @@ class MonitorManager {
     if (runtime.scheduler.pendingExit)
       return;
     this.removeRuntime(runtime);
+  }
+  fireAndForgetDeliver(runtime, reason) {
+    this.tryAutoDeliver(runtime, reason).catch(() => {});
   }
   removeRuntime(runtime) {
     if (runtime.destroyed && !this.bySession.get(runtime.record.ownerSessionID)?.has(runtime.record.label))
