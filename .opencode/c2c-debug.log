@@ -1,0 +1,8 @@
+[2026-04-21T00:25:18.325Z] pid=1220984 === c2c plugin boot sha=154352e3 path=/home/xertrov/.config/opencode/plugins/c2c.ts ===
+[2026-04-21T00:25:18.326Z] [pid=1220984] C2C_MCP_SESSION_ID not set — message delivery disabled
+[2026-04-21T02:46:38.142Z] pid=2686517 === c2c plugin boot sha=043ab375 path=/home/xertrov/.config/opencode/plugins/c2c.ts ===
+[2026-04-21T02:46:38.143Z] [pid=2686517] C2C_MCP_SESSION_ID not set — message delivery disabled
+[2026-04-21T02:49:03.707Z] pid=2711328 === c2c plugin boot sha=043ab375 path=/home/xertrov/.config/opencode/plugins/c2c.ts ===
+[2026-04-21T02:49:03.708Z] [pid=2711328] C2C_MCP_SESSION_ID not set — message delivery disabled
+[2026-04-21T03:13:52.972Z] pid=2961811 === c2c plugin boot sha=1376ea1f path=/home/xertrov/.config/opencode/plugins/c2c.ts ===
+[2026-04-21T03:13:52.972Z] [pid=2961811] C2C_MCP_SESSION_ID not set — message delivery disabled
