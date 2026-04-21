@@ -12500,6 +12500,29 @@ function formatRelativeSeconds(epochMs, baseMs) {
   const seconds = Math.max(0, epochMs - baseMs) / 1000;
   return `+${seconds.toFixed(2)}s`;
 }
+function formatBatchAttrs(record2, batch, batchAt) {
+  if (record2.outputFormat === "very-compact") {
+    return `id=${escapeXml(record2.monitorId)} at="${formatDateTime(batchAt)}"`;
+  }
+  return `id=${escapeXml(record2.monitorId)} seq=${batch.seq} label="${escapeXml(record2.label)}" at="${formatDateTime(batchAt)}"`;
+}
+function formatExitEvent(exit) {
+  const parts = [];
+  if (exit.exitCode === null)
+    parts.push("exit");
+  else
+    parts.push(`exit=${exit.exitCode}`);
+  if (exit.signal)
+    parts.push(`signal=${escapeXml(exit.signal)}`);
+  return `[${parts.join(" ")}]`;
+}
+function formatContentLine(record2, line) {
+  const prefix = record2.capture === "both" ? `${line.stream}: ` : "";
+  return `${prefix}${escapeXml(line.content)}`;
+}
+function formatTimedLine(text, includeOffset, at, baseMs) {
+  return includeOffset ? `${formatRelativeSeconds(at, baseMs)} ${text}` : text;
+}
 function formatTagName(template, values) {
   const rendered = template.replaceAll("{id}", values.id).replaceAll("{label}", values.label);
   const sanitized = rendered.replaceAll(/[^A-Za-z0-9_.-]/g, "_");
@@ -12514,19 +12537,17 @@ function formatBatchXml(input) {
   });
   const firstLineAt = input.batch.lines[0]?.ingestedAt;
   const batchAt = firstLineAt ?? input.batch.exit?.occurredAt ?? 0;
-  const attrs = `id=${escapeXml(input.record.monitorId)} seq=${input.batch.seq} label="${escapeXml(input.record.label)}" pid=${input.record.pid} at="${formatDateTime(batchAt)}"`;
+  const attrs = formatBatchAttrs(input.record, input.batch, batchAt);
   if (input.batch.lines.length === 0 && input.batch.exit) {
     return `<${tag}_exit ${attrs}>
-${formatRelativeSeconds(input.batch.exit.occurredAt, batchAt)} exit_code=${input.batch.exit.exitCode ?? ""} signal=${escapeXml(input.batch.exit.signal ?? "")}
+${formatExitEvent(input.batch.exit)}
 </${tag}_exit>`;
   }
-  const linesXml = input.batch.lines.map((line) => {
-    const prefix = input.record.capture === "both" ? `${line.stream}: ` : "";
-    return `${formatRelativeSeconds(line.ingestedAt, batchAt)} ${prefix}${escapeXml(line.content)}`;
-  }).join(`
+  const includeOffsets = input.batch.lines.length > 1 || input.batch.lines.length === 1 && Boolean(input.batch.exit);
+  const linesXml = input.batch.lines.map((line) => formatTimedLine(formatContentLine(input.record, line), includeOffsets, line.ingestedAt, batchAt)).join(`
 `);
   const exitXml = input.batch.exit ? `
-${formatRelativeSeconds(input.batch.exit.occurredAt, batchAt)} exit_code=${input.batch.exit.exitCode ?? ""} signal=${escapeXml(input.batch.exit.signal ?? "")}` : "";
+${formatTimedLine(formatExitEvent(input.batch.exit), includeOffsets, input.batch.exit.occurredAt, batchAt)}` : "";
   return `<${tag} ${attrs}>
 ${linesXml}${exitXml}
 </${tag}>`;
@@ -12617,6 +12638,7 @@ class MonitorManager {
       command: input.command,
       pid: child.pid ?? -1,
       capture: input.capture,
+      outputFormat: input.outputFormat ?? "compact",
       triggers: input.triggers,
       cwd: input.cwd,
       env: input.env ?? {},
@@ -12950,6 +12972,7 @@ class MonitorManager {
       status: runtime.record.status,
       pendingCount: runtime.scheduler.pendingLines.length,
       capture: runtime.record.capture,
+      outputFormat: runtime.record.outputFormat,
       triggers: runtime.record.triggers,
       logPath: runtime.record.logPath
     };
@@ -12995,6 +13018,7 @@ var MonitorPlugin = async (ctx) => {
           command: tool.schema.string().describe("Shell command to run in the background"),
           label: tool.schema.string().describe("Unique monitor label within the root session"),
           capture: tool.schema.enum(["stdout", "stderr", "both"]).default("both"),
+          outputFormat: tool.schema.enum(["compact", "very-compact"]).default("compact"),
           cwd: tool.schema.string().optional(),
           env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional(),
           tagTemplate: tool.schema.string().default("monitor_{id}"),
@@ -13017,6 +13041,7 @@ var MonitorPlugin = async (ctx) => {
             label: args.label,
             command: args.command,
             capture: args.capture,
+            outputFormat: args.outputFormat,
             cwd: args.cwd ?? context.directory,
             env: args.env,
             triggers: args.triggers,

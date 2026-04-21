@@ -13,6 +13,7 @@ import type {
   IngestedLine,
   LineCollectorState,
   MonitorRecord,
+  OutputFormat,
   PrimeState,
   SchedulerState,
   TriggerConfig,
@@ -24,6 +25,7 @@ export interface StartMonitorInput {
   label: string;
   command: string;
   capture: CaptureMode;
+  outputFormat?: OutputFormat;
   cwd: string;
   env?: Record<string, string>;
   triggers: TriggerConfig[];
@@ -39,6 +41,7 @@ export interface MonitorSummary {
   status: MonitorRecord["status"];
   pendingCount: number;
   capture: CaptureMode;
+  outputFormat: OutputFormat;
   triggers: TriggerConfig[];
   logPath: string;
 }
@@ -162,6 +165,7 @@ export class MonitorManager {
       command: input.command,
       pid: child.pid ?? -1,
       capture: input.capture,
+      outputFormat: input.outputFormat ?? "compact",
       triggers: input.triggers,
       cwd: input.cwd,
       env: input.env ?? {},
@@ -512,6 +516,7 @@ export class MonitorManager {
       status: runtime.record.status,
       pendingCount: runtime.scheduler.pendingLines.length,
       capture: runtime.record.capture,
+      outputFormat: runtime.record.outputFormat,
       triggers: runtime.record.triggers,
       logPath: runtime.record.logPath,
     };

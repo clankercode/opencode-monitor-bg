@@ -2,6 +2,8 @@ export type StreamType = "stdout" | "stderr";
 
 export type CaptureMode = "stdout" | "stderr" | "both";
 
+export type OutputFormat = "compact" | "very-compact";
+
 export type TriggerConfig =
   | { type: "line"; windowMs?: number }
   | { type: "idle" }
@@ -32,6 +34,7 @@ export interface MonitorRecord {
   command: string;
   pid: number;
   capture: CaptureMode;
+  outputFormat: OutputFormat;
   triggers: TriggerConfig[];
   cwd: string;
   env: Record<string, string>;

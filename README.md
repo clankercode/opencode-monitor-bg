@@ -1,6 +1,6 @@
 # opencode-monitor-bg
 
-OpenCode plugin that starts background processes, collects stdout/stderr lines, and delivers output back into the owning root session via `promptAsync` using XML envelopes.
+OpenCode plugin that starts background processes, collects stdout/stderr lines, and delivers output back into the owning root session via compact XML envelopes.
 
 ## Features
 
@@ -35,3 +35,4 @@ bun run build
 - Override log root with `MONITOR_LOG_DIR`.
 - XML tags are templated and sanitized from `tagTemplate`.
 - Model-facing XML uses readable UTC date-time strings without milliseconds.
+- `outputFormat` defaults to `compact`; `very-compact` drops sequence and label attrs.

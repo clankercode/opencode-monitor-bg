@@ -24,8 +24,10 @@ describe("xml", () => {
     });
 
     expect(xml).toContain('<build_m17 id=m17 seq=3');
+    expect(xml).not.toContain("pid=");
     expect(xml).toContain('at="2026-04-21T12:00:00Z"');
-    expect(xml).toContain('+0.00s &lt;danger&gt;');
+    expect(xml).toContain('&lt;danger&gt;');
+    expect(xml).not.toContain('+0.00s');
   });
 
   test("formatBatchXml renders exit-only envelopes", () => {
@@ -41,6 +43,47 @@ describe("xml", () => {
 
     expect(xml).toContain("<build_m17_exit");
     expect(xml).toContain('at="2026-04-21T12:00:09Z"');
-    expect(xml).toContain('+0.00s exit_code=0 signal=');
+    expect(xml).toContain('[exit=0]');
+    expect(xml).not.toContain('+0.00s');
+  });
+
+  test("formatBatchXml supports very compact output", () => {
+    const xml = formatBatchXml({
+      record: makeMonitorRecord({
+        monitorId: "m17",
+        label: "server",
+        tagTemplate: "build_{id}",
+        capture: "both",
+        outputFormat: "very-compact",
+      }),
+      batch: {
+        monitorId: "m17",
+        seq: 3,
+        lines: [makeLine({ content: "hello" }), makeLine({ stream: "stderr", content: "boom", ingestedAt: 1_700_000_001_000 })],
+        exit: makeExit({ occurredAt: 1_700_000_002_000, signal: "SIGTERM", exitCode: null }),
+      },
+    });
+
+    expect(xml).toContain('<build_m17 id=m17 at="2023-11-14T22:13:20Z">');
+    expect(xml).not.toContain("seq=");
+    expect(xml).not.toContain('label="server"');
+    expect(xml).toContain('+0.00s stdout: hello');
+    expect(xml).toContain('+1.00s stderr: boom');
+    expect(xml).toContain('+2.00s [exit signal=SIGTERM]');
+  });
+
+  test("formatBatchXml keeps offsets aligned for single line plus exit", () => {
+    const xml = formatBatchXml({
+      record: makeMonitorRecord({ monitorId: "m17", label: "server", tagTemplate: "build_{id}" }),
+      batch: {
+        monitorId: "m17",
+        seq: 5,
+        lines: [makeLine({ content: "done", ingestedAt: Date.parse("2026-04-21T12:00:00Z") })],
+        exit: makeExit({ occurredAt: Date.parse("2026-04-21T12:00:02Z") }),
+      },
+    });
+
+    expect(xml).toContain('+0.00s stdout: done');
+    expect(xml).toContain('+2.00s [exit=0]');
   });
 });

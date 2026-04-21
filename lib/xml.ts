@@ -18,6 +18,31 @@ function formatRelativeSeconds(epochMs: number, baseMs: number): string {
   return `+${seconds.toFixed(2)}s`;
 }
 
+function formatBatchAttrs(record: MonitorRecord, batch: DeliveryBatch, batchAt: number): string {
+  if (record.outputFormat === "very-compact") {
+    return `id=${escapeXml(record.monitorId)} at="${formatDateTime(batchAt)}"`;
+  }
+
+  return `id=${escapeXml(record.monitorId)} seq=${batch.seq} label="${escapeXml(record.label)}" at="${formatDateTime(batchAt)}"`;
+}
+
+function formatExitEvent(exit: NonNullable<DeliveryBatch["exit"]>): string {
+  const parts: string[] = [];
+  if (exit.exitCode === null) parts.push("exit");
+  else parts.push(`exit=${exit.exitCode}`);
+  if (exit.signal) parts.push(`signal=${escapeXml(exit.signal)}`);
+  return `[${parts.join(" ")}]`;
+}
+
+function formatContentLine(record: MonitorRecord, line: DeliveryBatch["lines"][number]): string {
+  const prefix = record.capture === "both" ? `${line.stream}: ` : "";
+  return `${prefix}${escapeXml(line.content)}`;
+}
+
+function formatTimedLine(text: string, includeOffset: boolean, at: number, baseMs: number): string {
+  return includeOffset ? `${formatRelativeSeconds(at, baseMs)} ${text}` : text;
+}
+
 export function formatTagName(template: string, values: { id: string; label: string }): string {
   const rendered = template
     .replaceAll("{id}", values.id)
@@ -34,24 +59,20 @@ export function formatBatchXml(input: { record: MonitorRecord; batch: DeliveryBa
   });
   const firstLineAt = input.batch.lines[0]?.ingestedAt;
   const batchAt = firstLineAt ?? input.batch.exit?.occurredAt ?? 0;
-  const attrs = `id=${escapeXml(input.record.monitorId)} seq=${input.batch.seq} label="${escapeXml(input.record.label)}" pid=${input.record.pid} at="${formatDateTime(batchAt)}"`;
+  const attrs = formatBatchAttrs(input.record, input.batch, batchAt);
 
   if (input.batch.lines.length === 0 && input.batch.exit) {
     return `<${tag}_exit ${attrs}>
-${formatRelativeSeconds(input.batch.exit.occurredAt, batchAt)} exit_code=${input.batch.exit.exitCode ?? ""} signal=${escapeXml(input.batch.exit.signal ?? "")}
+${formatExitEvent(input.batch.exit)}
 </${tag}_exit>`;
   }
 
+  const includeOffsets = input.batch.lines.length > 1 || (input.batch.lines.length === 1 && Boolean(input.batch.exit));
   const linesXml = input.batch.lines
-    .map((line) => {
-      const prefix = input.record.capture === "both" ? `${line.stream}: ` : "";
-      return `${formatRelativeSeconds(line.ingestedAt, batchAt)} ${prefix}${escapeXml(line.content)}`;
-    })
+    .map((line) => formatTimedLine(formatContentLine(input.record, line), includeOffsets, line.ingestedAt, batchAt))
     .join("\n");
   const exitXml = input.batch.exit
-    ? `\n${formatRelativeSeconds(input.batch.exit.occurredAt, batchAt)} exit_code=${input.batch.exit.exitCode ?? ""} signal=${escapeXml(
-        input.batch.exit.signal ?? "",
-      )}`
+    ? `\n${formatTimedLine(formatExitEvent(input.batch.exit), includeOffsets, input.batch.exit.occurredAt, batchAt)}`
     : "";
 
   return `<${tag} ${attrs}>\n${linesXml}${exitXml}\n</${tag}>`;

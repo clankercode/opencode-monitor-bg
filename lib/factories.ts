@@ -56,6 +56,7 @@ export function makeMonitorRecord(overrides: Partial<MonitorRecord> = {}): Monit
     command: "bun run dev",
     pid: 12345,
     capture: "both",
+    outputFormat: "compact",
     triggers: [{ type: "idle" }],
     cwd: "/tmp/project",
     env: {},

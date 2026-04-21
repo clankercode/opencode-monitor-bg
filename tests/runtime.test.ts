@@ -344,7 +344,7 @@ describe("runtime", () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       "root-6b",
-      `<idle_m2 id=m2 seq=1 label="server" pid=12345 at="2026-04-21T12:00:00Z">\n+0.00s hello\n</idle_m2>`,
+      `<idle_m2 id=m2 seq=1 label="server" at="2026-04-21T12:00:00Z">\nhello\n</idle_m2>`,
     );
   });
 
@@ -376,7 +376,7 @@ describe("runtime", () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       "root-6c",
-      `<instant_m2 id=m2 seq=1 label="server" pid=12345 at="2026-04-21T12:00:00Z">\n+0.00s hello\n</instant_m2>`,
+      `<instant_m2 id=m2 seq=1 label="server" at="2026-04-21T12:00:00Z">\nhello\n</instant_m2>`,
     );
   });
 
@@ -412,7 +412,39 @@ describe("runtime", () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       "root-6d",
-      `<empty_m2 id=m2 seq=1 label="server" pid=12345 at="1970-01-01T00:00:00Z">\n\n</empty_m2>`,
+      `<empty_m2 id=m2 seq=1 label="server" at="1970-01-01T00:00:00Z">\n\n</empty_m2>`,
+    );
+  });
+
+  test("very compact format trims outer attrs but keeps line prefixes", async () => {
+    const fakeChild = createFakeChild();
+    const promptAsync = mock(async () => {});
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-6e",
+      promptAsync,
+      getRootSessionID: async () => "root-6e",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-6e",
+      label: "server",
+      command: "ignored",
+      capture: "both",
+      outputFormat: "very-compact",
+      cwd: "/tmp",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "compact_{id}",
+    });
+
+    fakeChild.stdout.emit("data", Buffer.from("hello\n"));
+    fakeChild.stderr.emit("data", Buffer.from("boom\n"));
+    await manager.handleIdle("root-6e");
+
+    expect(promptAsync).toHaveBeenCalledWith(
+      "root-6e",
+      `<compact_m2 id=m2 at="2026-04-21T12:00:00Z">\n+0.00s stdout: hello\n+0.00s stderr: boom\n</compact_m2>`,
     );
   });
 
