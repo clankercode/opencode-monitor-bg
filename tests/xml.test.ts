@@ -14,7 +14,7 @@ describe("xml", () => {
 
   test("formatBatchXml escapes data and includes readable times", () => {
     const xml = formatBatchXml({
-      record: makeMonitorRecord({ monitorId: "m17", label: "server", tagTemplate: "build_{id}" }),
+      record: makeMonitorRecord({ monitorId: "m17", label: "server", tagTemplate: "build_{id}", capture: "stdout" }),
       batch: {
         monitorId: "m17",
         seq: 3,
@@ -23,9 +23,9 @@ describe("xml", () => {
       },
     });
 
-    expect(xml).toContain('<build_m17 id="m17" seq="3"');
+    expect(xml).toContain('<build_m17 id=m17 seq=3');
     expect(xml).toContain('at="2026-04-21T12:00:00Z"');
-    expect(xml).toContain("&lt;danger&gt;");
+    expect(xml).toContain('+0.00s &lt;danger&gt;');
   });
 
   test("formatBatchXml renders exit-only envelopes", () => {
@@ -41,5 +41,6 @@ describe("xml", () => {
 
     expect(xml).toContain("<build_m17_exit");
     expect(xml).toContain('at="2026-04-21T12:00:09Z"');
+    expect(xml).toContain('+0.00s exit_code=0 signal=');
   });
 });

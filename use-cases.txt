@@ -1,0 +1,20 @@
+1. Watch a local dev server in the background and only surface logs when the coding session goes idle.
+2. Tail a long-running test watcher and fetch buffered failures on demand without blocking the main session.
+3. Run a build command in the background and receive structured XML updates for each burst of output.
+4. Monitor a background migration job and deliver a final exit envelope when it completes.
+5. Capture stderr-only output from a flaky tool so warnings and errors are isolated from normal stdout noise.
+6. Capture stdout-only output from a clean status command while discarding noisy stderr diagnostics.
+7. Emit heartbeat updates from a mostly silent daemon using interval triggers with empty deliveries enabled.
+8. Batch rapid log bursts from a chatty process using a debounced line trigger so the session is not spammed.
+9. Trigger immediate delivery of the next line once the session becomes idle using an interval trigger with instant idle behavior.
+10. Start a background lint or typecheck process and kill it later when the branch of work changes.
+11. Run multiple labeled monitors for different services in the same repo, such as API, worker, and frontend.
+12. Keep monitor ownership tied to the root session so child sessions can inspect the same background process safely.
+13. Fetch pending output manually before deciding whether to inject anything into the live session.
+14. Record log files with readable timestamps for later debugging while still getting model-facing XML summaries.
+15. Monitor a CLI that occasionally exits unexpectedly and use the exit envelope to detect that failure quickly.
+16. Watch a long-running scraper or sync job and receive periodic summaries without blocking other tool work.
+17. Supervise a background formatter or code generator and surface only the parts that matter to the current task.
+18. Run a local proxy or tunnel process in the background and keep its connection messages attached to the owning session.
+19. Use custom XML tag templates so downstream automation can distinguish monitor categories by label or monitor ID.
+20. Reuse labels after a natural process exit to restart the same conceptual service without losing naming consistency.
