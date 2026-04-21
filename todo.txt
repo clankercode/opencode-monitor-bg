@@ -1,0 +1,1 @@
+- [] heartbeat simple bash died after a while
