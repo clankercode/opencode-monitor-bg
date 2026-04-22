@@ -22,6 +22,14 @@ cp dist/monitor.js ~/.config/opencode/plugins/monitor.js
 
 OpenCode also loads project-local plugins from `.opencode/plugins/` if you want to install it there instead.
 
+To have the global OpenCode plugin always track the latest local build from this repo, symlink it instead:
+
+```bash
+ln -sfn /home/xertrov/src/opencode-monitor-bg/dist/monitor.js ~/.config/opencode/plugins/monitor.js
+```
+
+After that, rerunning `bun run build` in this repo updates what new OpenCode sessions load globally.
+
 ## Development
 
 ```bash
