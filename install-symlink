@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+ln -sfn $PWD/dist/monitor.js ~/.config/opencode/plugins/monitor.js
+
