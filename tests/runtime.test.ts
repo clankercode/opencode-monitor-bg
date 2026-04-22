@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync } from "fs";
 import { EventEmitter } from "events";
 import os from "os";
 import path from "path";
@@ -834,6 +834,116 @@ describe("runtime", () => {
       await expect(manager.ensureSessionLoaded("root-lease")).rejects.toThrow("already owned");
     } finally {
       foreign.kill();
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("ensureSessionLoaded retries after a foreign lease owner exits", async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-lease-retry-"));
+    const foreign = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+    const replacement = createFakeChild(33002);
+    try {
+      const sessionDir = path.join(tempRoot, "root-lease-retry");
+      mkdirSync(sessionDir, { recursive: true });
+      await Bun.write(
+        path.join(sessionDir, "monitors.json"),
+        JSON.stringify(
+          {
+            version: 1,
+            rootSessionID: "root-lease-retry",
+            monitors: [
+              {
+                ownerSessionID: "root-lease-retry",
+                label: "heartbeat",
+                monitorId: "m2",
+                command: "while true; do echo ok; sleep 1; done",
+                pid: foreign.pid,
+                capture: "stdout",
+                outputFormat: "compact",
+                triggers: [{ type: "idle" }],
+                cwd: "/tmp",
+                env: {},
+                logPath: path.join(sessionDir, "heartbeat.log"),
+                stdoutPath: path.join(sessionDir, "heartbeat.stdout.log"),
+                stderrPath: path.join(sessionDir, "heartbeat.stderr.log"),
+                stdoutOffset: 0,
+                stderrOffset: 0,
+                stdoutRemainder: "",
+                stderrRemainder: "",
+                tagTemplate: "monitor_{id}",
+                lifetime: "persistent",
+                sendOnlyLatest: false,
+                nextSeq: 1,
+                pendingLines: [],
+                status: "running",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+      );
+      await Bun.write(
+        path.join(sessionDir, "monitors.lease.json"),
+        JSON.stringify({
+          version: 1,
+          rootSessionID: "root-lease-retry",
+          ownerPid: foreign.pid,
+          acquiredAt: Date.now(),
+        }),
+      );
+
+      const manager = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync: async () => {},
+        getRootSessionID: async () => "root-lease-retry",
+        spawnProcess: (() => replacement) as any,
+      });
+
+      await expect(manager.ensureSessionLoaded("root-lease-retry")).rejects.toThrow("already owned");
+
+      foreign.kill();
+      await foreign.exited;
+
+      await expect(manager.ensureSessionLoaded("root-lease-retry")).resolves.toBeUndefined();
+      const listed = await manager.listMonitors("root-lease-retry");
+      expect(listed).toHaveLength(1);
+      expect(listed[0]?.label).toBe("heartbeat");
+    } finally {
+      foreign.kill();
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("cleanupLogs preserves files for sessions that still have a manifest or lease", async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-cleanup-"));
+    const staleAt = Date.parse("2026-04-01T00:00:00Z");
+    const now = Date.parse("2026-04-22T12:00:00Z");
+    try {
+      const sessionDir = path.join(tempRoot, "root-clean");
+      mkdirSync(sessionDir, { recursive: true });
+      await Bun.write(path.join(sessionDir, "monitors.json"), JSON.stringify({ version: 1, rootSessionID: "root-clean", monitors: [] }));
+      await Bun.write(path.join(sessionDir, "monitors.lease.json"), JSON.stringify({ version: 1, rootSessionID: "root-clean", ownerPid: process.pid, acquiredAt: staleAt }));
+      await Bun.write(path.join(sessionDir, "server.log"), "old log\n");
+      await Bun.write(path.join(sessionDir, "server.stdout.log"), "old stdout\n");
+      const staleDate = new Date(staleAt);
+      utimesSync(path.join(sessionDir, "server.log"), staleDate, staleDate);
+      utimesSync(path.join(sessionDir, "server.stdout.log"), staleDate, staleDate);
+
+      const manager = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync: async () => {},
+        getRootSessionID: async () => "root-clean",
+        now: () => now,
+      });
+
+      manager.cleanupLogs(7 * 24 * 60 * 60 * 1_000);
+
+      expect(existsSync(path.join(sessionDir, "server.log"))).toBeTrue();
+      expect(existsSync(path.join(sessionDir, "server.stdout.log"))).toBeTrue();
+      expect(existsSync(path.join(sessionDir, "monitors.json"))).toBeTrue();
+      expect(existsSync(path.join(sessionDir, "monitors.lease.json"))).toBeTrue();
+    } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });

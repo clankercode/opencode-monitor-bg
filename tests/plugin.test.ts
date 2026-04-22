@@ -1,4 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync } from "fs";
+import os from "os";
+import path from "path";
 
 import MonitorPlugin from "../monitor.ts";
 
@@ -19,28 +22,50 @@ async function withEnv<T>(env: Record<string, string | undefined>, work: () => P
   }
 }
 
+async function withTempStateRoot<T>(work: () => Promise<T>): Promise<T> {
+  const xdgStateHome = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-plugin-test-"));
+  try {
+    return await withEnv({ XDG_STATE_HOME: xdgStateHome }, work);
+  } finally {
+    rmSync(xdgStateHome, { recursive: true, force: true });
+  }
+}
+
+async function makePlugin(options?: {
+  promptAsync?: ReturnType<typeof mock>;
+  sessionGet?: ReturnType<typeof mock>;
+  sessionStatus?: ReturnType<typeof mock>;
+}) {
+  const promptAsync = options?.promptAsync ?? mock(async () => ({}));
+  const sessionGet =
+    options?.sessionGet ??
+    mock(async ({ path }: { path: { id: string } }) => ({
+      data: { id: path.id, directory: "/tmp", projectID: "p1", title: "t", version: "1", time: { created: 0, updated: 0 } },
+    }));
+
+  const plugin = await MonitorPlugin({
+    client: {
+      session: {
+        promptAsync,
+        get: sessionGet,
+        status: options?.sessionStatus,
+      },
+    } as any,
+    project: {} as any,
+    directory: "/tmp",
+    worktree: "/tmp",
+    experimental_workspace: { register() {} },
+    serverUrl: new URL("http://localhost:4096"),
+    $: {} as any,
+  });
+
+  return { plugin, promptAsync, sessionGet, sessionStatus: options?.sessionStatus };
+}
+
 describe("plugin", () => {
   test("session.deleted uses event.properties.info.id", async () => {
-    await withEnv({ XDG_STATE_HOME: "/tmp/opencode-monitor-plugin-test" }, async () => {
-      const promptAsync = mock(async () => ({}));
-      const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({
-        data: { id: path.id, directory: "/tmp", projectID: "p1", title: "t", version: "1", time: { created: 0, updated: 0 } },
-      }));
-
-      const plugin = await MonitorPlugin({
-        client: {
-          session: {
-            promptAsync,
-            get: sessionGet,
-          },
-        } as any,
-        project: {} as any,
-        directory: "/tmp",
-        worktree: "/tmp",
-        experimental_workspace: { register() {} },
-        serverUrl: new URL("http://localhost:4096"),
-        $: {} as any,
-      });
+    await withTempStateRoot(async () => {
+      const { plugin, promptAsync } = await makePlugin();
 
       await plugin.event?.({
         event: {
@@ -65,26 +90,8 @@ describe("plugin", () => {
   });
 
   test("session.status routes idle and busy correctly", async () => {
-    await withEnv({ XDG_STATE_HOME: "/tmp/opencode-monitor-plugin-test" }, async () => {
-      const promptAsync = mock(async () => ({}));
-      const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({
-        data: { id: path.id, directory: "/tmp", projectID: "p1", title: "t", version: "1", time: { created: 0, updated: 0 } },
-      }));
-
-      const plugin = await MonitorPlugin({
-        client: {
-          session: {
-            promptAsync,
-            get: sessionGet,
-          },
-        } as any,
-        project: {} as any,
-        directory: "/tmp",
-        worktree: "/tmp",
-        experimental_workspace: { register() {} },
-        serverUrl: new URL("http://localhost:4096"),
-        $: {} as any,
-      });
+    await withTempStateRoot(async () => {
+      const { plugin, promptAsync } = await makePlugin();
 
       await plugin.event?.({
         event: {
@@ -111,28 +118,9 @@ describe("plugin", () => {
   });
 
   test("monitor_start accepts lifetime and send_only_latest arguments", async () => {
-    await withEnv({ XDG_STATE_HOME: "/tmp/opencode-monitor-plugin-test" }, async () => {
-      const promptAsync = mock(async () => ({}));
-      const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({
-        data: { id: path.id, directory: "/tmp", projectID: "p1", title: "t", version: "1", time: { created: 0, updated: 0 } },
-      }));
+    await withTempStateRoot(async () => {
       const sessionStatus = mock(async () => ({ data: { "root-3": { type: "idle" } } }));
-
-      const plugin = await MonitorPlugin({
-        client: {
-          session: {
-            promptAsync,
-            get: sessionGet,
-            status: sessionStatus,
-          },
-        } as any,
-        project: {} as any,
-        directory: "/tmp",
-        worktree: "/tmp",
-        experimental_workspace: { register() {} },
-        serverUrl: new URL("http://localhost:4096"),
-        $: {} as any,
-      });
+      const { plugin } = await makePlugin({ sessionStatus });
 
       const result = await plugin.tool?.monitor_start.execute(
         {
@@ -152,6 +140,49 @@ describe("plugin", () => {
       expect(String(result?.output ?? result)).toContain('"label": "heartbeat"');
       expect(String(result?.output ?? result)).toContain('"lifetime": "persistent"');
       expect(String(result?.output ?? result)).toContain('"sendOnlyLatest": true');
+    });
+  });
+
+  test("session.updated triggers a restore lookup for the updated session", async () => {
+    await withTempStateRoot(async () => {
+      const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({
+        data: {
+          id: path.id,
+          parentID: path.id === "child-updated" ? "root-updated" : undefined,
+          directory: "/tmp",
+          projectID: "p1",
+          title: "t",
+          version: "1",
+          time: { created: 0, updated: 0 },
+        },
+      }));
+      const { plugin } = await makePlugin({ sessionGet });
+
+      await plugin.event?.({
+        event: {
+          type: "session.updated",
+          properties: {
+            info: { id: "child-updated", parentID: "root-updated" },
+          },
+        } as any,
+      });
+
+      expect(sessionGet).toHaveBeenCalledWith({ path: { id: "child-updated" } });
+    });
+  });
+
+  test("startup restore scan polls session.status and resolves listed sessions", async () => {
+    await withTempStateRoot(async () => {
+      const sessionStatus = mock(async () => ({ data: { "root-scan": { type: "idle" } } }));
+      const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({
+        data: { id: path.id, directory: "/tmp", projectID: "p1", title: "t", version: "1", time: { created: 0, updated: 0 } },
+      }));
+
+      await makePlugin({ sessionGet, sessionStatus });
+      await Bun.sleep(1_100);
+
+      expect(sessionStatus).toHaveBeenCalled();
+      expect(sessionGet).toHaveBeenCalledWith({ path: { id: "root-scan" } });
     });
   });
 });

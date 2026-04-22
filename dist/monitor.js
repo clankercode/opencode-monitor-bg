@@ -12624,7 +12624,6 @@ class MonitorManager {
   sessionRoots = new Map;
   loadedSessions = new Set;
   loadingSessions = new Map;
-  loadErrors = new Map;
   leasedSessions = new Set;
   constructor(options) {
     this.now = options.now ?? Date.now;
@@ -12680,9 +12679,6 @@ class MonitorManager {
   }
   async ensureSessionLoaded(sessionID) {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
-    const priorError = this.loadErrors.get(rootSessionID);
-    if (priorError)
-      throw priorError;
     if (this.loadedSessions.has(rootSessionID))
       return;
     const pending = this.loadingSessions.get(rootSessionID);
@@ -12692,11 +12688,6 @@ class MonitorManager {
     }
     const load = this.loadPersistentSession(rootSessionID).then(() => {
       this.loadedSessions.add(rootSessionID);
-      this.loadErrors.delete(rootSessionID);
-    }).catch((error45) => {
-      const normalized = error45 instanceof Error ? error45 : new Error(String(error45));
-      this.loadErrors.set(rootSessionID, normalized);
-      throw normalized;
     }).finally(() => {
       this.loadingSessions.delete(rootSessionID);
     });
@@ -12849,7 +12840,6 @@ class MonitorManager {
     }
     this.sessionRoots.delete(rootSessionID);
     this.loadedSessions.delete(rootSessionID);
-    this.loadErrors.delete(rootSessionID);
     this.deleteManifest(rootSessionID);
     this.releaseSessionLease(rootSessionID);
   }

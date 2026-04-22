@@ -67,6 +67,7 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Verify restarting OpenCode and revisiting the same session restores persistent monitors only once.
 - Verify a persistent monitor whose prior PID is gone is auto-restarted on resume.
 - Verify a second live OpenCode process trying to load the same session gets a lease conflict instead of double-owning the monitors.
+- Verify the original instance can retry successfully after the conflicting lease owner exits.
 
 15. Latest-only grouped delivery
 - Verify `send_only_latest: true` collapses a multi-line burst to the newest line.

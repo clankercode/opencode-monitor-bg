@@ -49,6 +49,7 @@ bun run build
 - Background command output is captured via per-monitor state files instead of parent-owned stdout/stderr pipes, so quiet loops keep running even if the plugin host restarts.
 - `monitor_start` accepts `lifetime: "ephemeral" | "persistent"` and defaults to `ephemeral`.
 - Persistent monitors are auto-restored once per root session after plugin startup or first session touch. If another live OpenCode process already owns that session lease, restore is rejected.
+- If a previously-conflicting lease owner exits, a later restore attempt in the same OpenCode instance can reclaim the stale lease and continue.
 - Persistent monitors are best-effort killed when the OpenCode host exits cleanly, but their saved desired-active state remains so the next session resume can restart them.
 - `monitor_start` accepts `send_only_latest: true|false` and defaults to `false`. When enabled, grouped deliveries and `monitor_fetch` keep only the newest pending line while still preserving any exit event.
 - Debug logging writes JSONL to `${MONITOR_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor}/plugin-debug.jsonl`.
