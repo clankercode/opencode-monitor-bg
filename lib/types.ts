@@ -43,6 +43,7 @@ export interface MonitorRecord {
   logPath: string;
   tagTemplate: string;
   lifetime: MonitorLifetime;
+  truncate: number;
   sendOnlyLatest: boolean;
   requestedMonitorId?: string;
   nextSeq: number;
@@ -110,7 +111,8 @@ export interface PersistentMonitorSnapshot {
   stderrRemainder: string;
   tagTemplate: string;
   lifetime: MonitorLifetime;
-  sendOnlyLatest: boolean;
+  truncate?: number | boolean;
+  sendOnlyLatest?: boolean;
   requestedMonitorId?: string;
   nextSeq: number;
   pendingLines: IngestedLine[];

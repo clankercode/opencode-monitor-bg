@@ -34,9 +34,14 @@ function formatExitEvent(exit: NonNullable<DeliveryBatch["exit"]>): string {
   return `[${parts.join(" ")}]`;
 }
 
+function truncateLine(content: string, limit: number): string {
+  if (limit < 1 || content.length <= limit) return content;
+  return `${content.slice(0, limit)}…`;
+}
+
 function formatContentLine(record: MonitorRecord, line: DeliveryBatch["lines"][number]): string {
   const prefix = record.capture === "both" ? `${line.stream}: ` : "";
-  return `${prefix}${escapeXml(line.content)}`;
+  return `${prefix}${escapeXml(truncateLine(line.content, record.truncate))}`;
 }
 
 function formatTimedLine(text: string, includeOffset: boolean, at: number, baseMs: number): string {

@@ -31,6 +31,15 @@ async function withTempStateRoot<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
+async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (check()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`Condition not met within ${timeoutMs}ms`);
+}
+
 async function makePlugin(options?: {
   promptAsync?: ReturnType<typeof mock>;
   sessionGet?: ReturnType<typeof mock>;
@@ -117,7 +126,7 @@ describe("plugin", () => {
     });
   });
 
-  test("monitor_start accepts lifetime and send_only_latest arguments", async () => {
+  test("monitor_start accepts lifetime and truncate arguments", async () => {
     await withTempStateRoot(async () => {
       const sessionStatus = mock(async () => ({ data: { "root-3": { type: "idle" } } }));
       const { plugin } = await makePlugin({ sessionStatus });
@@ -132,14 +141,68 @@ describe("plugin", () => {
           triggers: [{ type: "idle" }],
           tagTemplate: "monitor_{id}",
           lifetime: "persistent",
-          send_only_latest: true,
+          truncate: 200,
         } as any,
         { sessionID: "root-3", directory: "/tmp" } as any,
       );
 
       expect(String(result?.output ?? result)).toContain('"label": "heartbeat"');
       expect(String(result?.output ?? result)).toContain('"lifetime": "persistent"');
+      expect(String(result?.output ?? result)).toContain('"truncate": 200');
+    });
+  });
+
+  test("monitor_start keeps send_only_latest separate from truncate", async () => {
+    await withTempStateRoot(async () => {
+      const sessionStatus = mock(async () => ({ data: { "root-3b": { type: "idle" } } }));
+      const { plugin } = await makePlugin({ sessionStatus });
+
+      const result = await plugin.tool?.monitor_start.execute(
+        {
+          command: "echo ok",
+          label: "heartbeat",
+          capture: "stdout",
+          outputFormat: "compact",
+          cwd: "/tmp",
+          triggers: [{ type: "idle" }],
+          tagTemplate: "monitor_{id}",
+          truncate: 80,
+          send_only_latest: true,
+        } as any,
+        { sessionID: "root-3b", directory: "/tmp" } as any,
+      );
+
+      expect(String(result?.output ?? result)).toContain('"truncate": 80');
       expect(String(result?.output ?? result)).toContain('"sendOnlyLatest": true');
+    });
+  });
+
+  test("monitor_start hydrates current idle status so idle trigger can fire without a new idle event", async () => {
+    await withTempStateRoot(async () => {
+      const sessionStatus = mock(async () => ({ data: { "root-idle-start": { type: "idle" } } }));
+      const promptAsync = mock(async () => ({}));
+      const { plugin } = await makePlugin({ sessionStatus, promptAsync });
+
+      await plugin.tool?.monitor_start.execute(
+        {
+          command: "printf 'hello\\n'; sleep 5",
+          label: "heartbeat",
+          capture: "stdout",
+          outputFormat: "compact",
+          cwd: "/tmp",
+          triggers: [{ type: "idle" }],
+          tagTemplate: "monitor_{id}",
+        } as any,
+        { sessionID: "root-idle-start", directory: "/tmp" } as any,
+      );
+
+      await waitFor(() => promptAsync.mock.calls.length > 0, 500);
+      expect(promptAsync.mock.calls[0]?.[0]?.path?.id).toBe("root-idle-start");
+
+      await plugin.tool?.monitor_kill.execute(
+        { label: "heartbeat", signal: "SIGTERM" } as any,
+        { sessionID: "root-idle-start", directory: "/tmp" } as any,
+      );
     });
   });
 
@@ -218,6 +281,55 @@ describe("plugin", () => {
     });
   });
 
+  test("startup restore scan applies idle status to restored backlog", async () => {
+    await withTempStateRoot(async () => {
+      const sessionStatus = mock(async () => ({ data: { "root-restore-idle": { type: "idle" } } }));
+      const promptAsync = mock(async () => ({}));
+      const stateRoot = path.join(process.env.XDG_STATE_HOME!, "opencode-monitor");
+      const sessionDir = path.join(stateRoot, "root-restore-idle");
+      mkdirSync(sessionDir, { recursive: true });
+      await Bun.write(
+        path.join(sessionDir, "monitors.json"),
+        JSON.stringify({
+          version: 1,
+          rootSessionID: "root-restore-idle",
+          monitors: [
+            {
+              ownerSessionID: "root-restore-idle",
+              label: "heartbeat",
+              monitorId: "m2",
+              command: "while true; do echo ok; sleep 1; done",
+              pid: process.pid,
+              capture: "stdout",
+              outputFormat: "compact",
+              triggers: [{ type: "idle" }],
+              cwd: "/tmp",
+              env: {},
+              logPath: path.join(sessionDir, "heartbeat.log"),
+              stdoutPath: path.join(sessionDir, "heartbeat.stdout.log"),
+              stderrPath: path.join(sessionDir, "heartbeat.stderr.log"),
+              stdoutOffset: 0,
+              stderrOffset: 0,
+              stdoutRemainder: "",
+              stderrRemainder: "",
+              tagTemplate: "monitor_{id}",
+              lifetime: "persistent",
+              truncate: 0,
+              nextSeq: 1,
+              pendingLines: [{ stream: "stdout", content: "hello", ingestedAt: Date.parse("2026-04-22T08:00:00Z") }],
+              status: "running",
+            },
+          ],
+        }),
+      );
+
+      await makePlugin({ promptAsync, sessionStatus });
+      await waitFor(() => promptAsync.mock.calls.length > 0, 1_500);
+
+      expect(promptAsync.mock.calls[0]?.[0]?.path?.id).toBe("root-restore-idle");
+    });
+  });
+
   test("session events surface persistent lease conflicts", async () => {
     await withTempStateRoot(async () => {
       const foreign = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
@@ -251,7 +363,7 @@ describe("plugin", () => {
                 stderrRemainder: "",
                 tagTemplate: "monitor_{id}",
                 lifetime: "persistent",
-                sendOnlyLatest: false,
+                truncate: 0,
                 nextSeq: 1,
                 pendingLines: [],
                 status: "running",

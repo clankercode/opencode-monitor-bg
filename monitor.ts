@@ -46,6 +46,16 @@ export const MonitorPlugin: Plugin = async (ctx) => {
     }
   };
 
+  const syncSessionIdleState = async (sessionID: string, statuses?: Record<string, { type: string }>): Promise<void> => {
+    const nextStatuses =
+      statuses ??
+      (((await ctx.client.session.status?.()) as { data?: Record<string, { type: string }> } | undefined)?.data ?? {});
+    const status = nextStatuses[sessionID];
+    if (!status) return;
+    if (status.type === "idle") await manager.handleIdle(sessionID);
+    else await manager.handleActivity(sessionID);
+  };
+
   const startRestoreScan = () => {
     let attemptsRemaining = 60;
     const tick = async () => {
@@ -53,11 +63,12 @@ export const MonitorPlugin: Plugin = async (ctx) => {
       attemptsRemaining -= 1;
       try {
         const result = await ctx.client.session.status?.();
-        const statuses = (result as { data?: Record<string, unknown> } | undefined)?.data ?? {};
+        const statuses = (result as { data?: Record<string, { type: string }> } | undefined)?.data ?? {};
         await Promise.all(
           Object.keys(statuses).map(async (sessionID) => {
             try {
               await manager.ensureSessionLoaded(sessionID);
+              await syncSessionIdleState(sessionID, statuses);
             } catch (error) {
               await reportRestoreError(sessionID, error);
             }
@@ -93,6 +104,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
           tagTemplate: tool.schema.string().default("monitor_{id}"),
           lifetime: tool.schema.enum(["ephemeral", "persistent"]).default("ephemeral"),
           requestedId: tool.schema.string().optional(),
+          truncate: tool.schema.number().default(0),
           send_only_latest: tool.schema.boolean().default(false),
           triggers: tool.schema
             .array(
@@ -112,6 +124,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
         },
         async execute(args, context) {
           await manager.ensureSessionLoaded(context.sessionID);
+          await syncSessionIdleState(context.sessionID);
           const summary = await manager.startMonitor({
             ownerSessionID: context.sessionID,
             label: args.label,
@@ -124,6 +137,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
             tagTemplate: args.tagTemplate,
             lifetime: args.lifetime,
             requestedId: args.requestedId,
+            truncate: args.truncate,
             sendOnlyLatest: args.send_only_latest,
           });
           return {

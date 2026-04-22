@@ -70,7 +70,7 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Verify the original instance can retry successfully after the conflicting lease owner exits.
 
 15. Latest-only grouped delivery
-- Verify `send_only_latest: true` collapses a multi-line burst to the newest line.
+- Verify `truncate: 200` caps each emitted line to 200 characters and appends `…` when a line exceeds the limit.
 - Verify `monitor_fetch` follows the same collapse behavior.
 - Verify exit events are still included with the kept latest line.
 
@@ -122,7 +122,7 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Repeat with the original monitored PID already gone and expect the command to auto-restart.
 
 ### Scenario J: Latest-only heartbeat
-- Start a monitor that emits repetitive lines in quick bursts with `send_only_latest: true`.
+- Start a monitor that emits long repetitive lines with `truncate: 200`.
 - Trigger a grouped delivery via `idle`, `interval`, or `monitor_fetch`.
 - Expect only the newest pending line to be delivered, plus any exit marker if the process finished.
 
