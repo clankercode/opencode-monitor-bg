@@ -1,4 +1,34 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-ln -sfn $PWD/dist/monitor.js ~/.config/opencode/plugins/monitor.js
+SRC="$PWD/dist/monitor.js"
+DEST="$HOME/.config/opencode/plugins/monitor.js"
+DEST_DIR="$(dirname "$DEST")"
 
+echo "==> Installing monitor plugin..."
+echo "    Source: $SRC"
+echo "    Dest:   $DEST"
+
+if [[ ! -f "$SRC" ]]; then
+    echo "ERROR: Source file not found: $SRC" >&2
+    echo "Hint: Run 'bun run build' first." >&2
+    exit 1
+fi
+
+if [[ -L "$DEST" ]]; then
+    current_target="$(readlink "$DEST")"
+    if [[ "$(realpath "$current_target")" == "$(realpath "$SRC")" ]]; then
+        echo "==> Already symlinked correctly: $DEST -> $SRC"
+        exit 0
+    fi
+    echo "==> Updating existing symlink..."
+fi
+
+if [[ ! -d "$DEST_DIR" ]]; then
+    echo "Creating plugin directory: $DEST_DIR"
+    mkdir -p "$DEST_DIR"
+fi
+
+ln -sfn "$SRC" "$DEST"
+
+echo "==> Done! Plugin symlink installed."
