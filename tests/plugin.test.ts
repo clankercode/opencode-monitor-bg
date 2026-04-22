@@ -143,6 +143,38 @@ describe("plugin", () => {
     });
   });
 
+  test("monitor_list includes the original command and launch metadata", async () => {
+    await withTempStateRoot(async () => {
+      const sessionStatus = mock(async () => ({ data: { "root-list": { type: "idle" } } }));
+      const { plugin } = await makePlugin({ sessionStatus });
+
+      await plugin.tool?.monitor_start.execute(
+        {
+          command: "bun run dev --hot",
+          label: "heartbeat",
+          capture: "stdout",
+          outputFormat: "compact",
+          cwd: "/tmp",
+          triggers: [{ type: "idle" }],
+          tagTemplate: "build_{id}",
+          requestedId: "user-picked-id",
+        } as any,
+        { sessionID: "root-list", directory: "/tmp" } as any,
+      );
+
+      const result = await plugin.tool?.monitor_list.execute({} as any, {
+        sessionID: "root-list",
+        directory: "/tmp",
+      } as any);
+      const output = String(result?.output ?? result);
+
+      expect(output).toContain('"command": "bun run dev --hot"');
+      expect(output).toContain('"cwd": "/tmp"');
+      expect(output).toContain('"tagTemplate": "build_{id}"');
+      expect(output).toContain('"requestedMonitorId": "user-picked-id"');
+    });
+  });
+
   test("session.updated triggers a restore lookup for the updated session", async () => {
     await withTempStateRoot(async () => {
       const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({

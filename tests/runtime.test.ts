@@ -86,6 +86,35 @@ describe("runtime", () => {
     expect(start.ownerSessionID).toBe("root-1b");
   });
 
+  test("listMonitors preserves launch configuration needed to identify entries", async () => {
+    const fakeChild = createFakeChild();
+    const manager = new MonitorManager({
+      stateRoot: "/tmp/opencode-monitor-runtime-test-summary",
+      promptAsync: async () => {},
+      getRootSessionID: async () => "root-summary",
+      now: () => Date.parse("2026-04-21T12:00:00Z"),
+      spawnProcess: (() => fakeChild) as any,
+    });
+
+    await manager.startMonitor({
+      ownerSessionID: "root-summary",
+      label: "server",
+      command: "bun run dev --hot",
+      capture: "stdout",
+      cwd: "/tmp/project",
+      triggers: [{ type: "idle" }],
+      tagTemplate: "build_{id}",
+      requestedId: "user-picked-id",
+    });
+
+    const listed = await manager.listMonitors("root-summary");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.command).toBe("bun run dev --hot");
+    expect(listed[0]?.cwd).toBe("/tmp/project");
+    expect(listed[0]?.tagTemplate).toBe("build_{id}");
+    expect(listed[0]?.requestedMonitorId).toBe("user-picked-id");
+  });
+
   test("fetchPending returns pending state without injection", async () => {
     const fakeChild = createFakeChild();
     const promptAsync = mock(async () => {});

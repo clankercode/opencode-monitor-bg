@@ -61,15 +61,19 @@ export interface MonitorSummary {
   ownerSessionID: string;
   label: string;
   monitorId: string;
+  command: string;
   pid: number;
   status: MonitorRecord["status"];
   pendingCount: number;
   capture: CaptureMode;
   outputFormat: OutputFormat;
   triggers: TriggerConfig[];
+  cwd: string;
   logPath: string;
+  tagTemplate: string;
   lifetime: MonitorLifetime;
   sendOnlyLatest: boolean;
+  requestedMonitorId?: string;
 }
 
 export interface MonitorManagerOptions {
@@ -817,15 +821,19 @@ export class MonitorManager {
       ownerSessionID: runtime.record.ownerSessionID,
       label: runtime.record.label,
       monitorId: runtime.record.monitorId,
+      command: runtime.record.command,
       pid: runtime.record.pid,
       status: runtime.record.status,
       pendingCount: runtime.scheduler.pendingLines.length,
       capture: runtime.record.capture,
       outputFormat: runtime.record.outputFormat,
       triggers: runtime.record.triggers,
+      cwd: runtime.record.cwd,
       logPath: runtime.record.logPath,
+      tagTemplate: runtime.record.tagTemplate,
       lifetime: runtime.record.lifetime,
       sendOnlyLatest: runtime.record.sendOnlyLatest,
+      requestedMonitorId: runtime.record.requestedMonitorId,
     };
   }
 
