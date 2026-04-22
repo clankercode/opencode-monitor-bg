@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 
@@ -183,6 +183,76 @@ describe("plugin", () => {
 
       expect(sessionStatus).toHaveBeenCalled();
       expect(sessionGet).toHaveBeenCalledWith({ path: { id: "root-scan" } });
+    });
+  });
+
+  test("session events surface persistent lease conflicts", async () => {
+    await withTempStateRoot(async () => {
+      const foreign = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+      try {
+        const stateRoot = path.join(process.env.XDG_STATE_HOME!, "opencode-monitor");
+        const sessionDir = path.join(stateRoot, "root-conflict");
+        mkdirSync(sessionDir, { recursive: true });
+        await Bun.write(
+          path.join(sessionDir, "monitors.json"),
+          JSON.stringify({
+            version: 1,
+            rootSessionID: "root-conflict",
+            monitors: [
+              {
+                ownerSessionID: "root-conflict",
+                label: "heartbeat",
+                monitorId: "m2",
+                command: "while true; do echo ok; sleep 1; done",
+                pid: foreign.pid,
+                capture: "stdout",
+                outputFormat: "compact",
+                triggers: [{ type: "idle" }],
+                cwd: "/tmp",
+                env: {},
+                logPath: path.join(sessionDir, "heartbeat.log"),
+                stdoutPath: path.join(sessionDir, "heartbeat.stdout.log"),
+                stderrPath: path.join(sessionDir, "heartbeat.stderr.log"),
+                stdoutOffset: 0,
+                stderrOffset: 0,
+                stdoutRemainder: "",
+                stderrRemainder: "",
+                tagTemplate: "monitor_{id}",
+                lifetime: "persistent",
+                sendOnlyLatest: false,
+                nextSeq: 1,
+                pendingLines: [],
+                status: "running",
+              },
+            ],
+          }),
+        );
+        await Bun.write(
+          path.join(sessionDir, "monitors.lease.json"),
+          JSON.stringify({
+            version: 1,
+            rootSessionID: "root-conflict",
+            ownerPid: foreign.pid,
+            acquiredAt: Date.now(),
+          }),
+        );
+
+        const { plugin } = await makePlugin();
+        await expect(
+          plugin.event?.({
+            event: {
+              type: "session.status",
+              properties: {
+                sessionID: "root-conflict",
+                status: { type: "idle" },
+              },
+            } as any,
+          }),
+        ).rejects.toThrow("already owned");
+      } finally {
+        foreign.kill();
+        await foreign.exited;
+      }
     });
   });
 });

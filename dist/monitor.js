@@ -13577,6 +13577,18 @@ var MonitorPlugin = async (ctx) => {
     process.once(signal, shutdown);
   }
   process.once("exit", shutdown);
+  const reportRestoreError = async (sessionID, error45) => {
+    const message = error45 instanceof Error ? error45.message : String(error45);
+    try {
+      await ctx.client.app?.log?.({
+        body: {
+          service: "opencode-monitor-bg",
+          level: "error",
+          message: `Failed to restore persistent monitors for session ${sessionID}: ${message}`
+        }
+      });
+    } catch {}
+  };
   const startRestoreScan = () => {
     let attemptsRemaining = 60;
     const tick = async () => {
@@ -13586,7 +13598,13 @@ var MonitorPlugin = async (ctx) => {
       try {
         const result = await ctx.client.session.status?.();
         const statuses = result?.data ?? {};
-        await Promise.all(Object.keys(statuses).map((sessionID) => manager.ensureSessionLoaded(sessionID).catch(() => {})));
+        await Promise.all(Object.keys(statuses).map(async (sessionID) => {
+          try {
+            await manager.ensureSessionLoaded(sessionID);
+          } catch (error45) {
+            await reportRestoreError(sessionID, error45);
+          }
+        }));
       } catch {}
       if (attemptsRemaining > 0)
         setTimeout(() => void tick(), 1000);
@@ -13684,17 +13702,17 @@ var MonitorPlugin = async (ctx) => {
     event: async ({ event }) => {
       if (event.type === "session.created") {
         manager.rememberSessionCreated(event);
-        await manager.ensureSessionLoaded(event.properties.info.id).catch(() => {});
+        await manager.ensureSessionLoaded(event.properties.info.id);
         return;
       }
       if (event.type === "session.updated") {
         const updated = event;
         manager.rememberSessionInfo(updated.properties.info.id, updated.properties.info.parentID ?? undefined);
-        await manager.ensureSessionLoaded(updated.properties.info.id).catch(() => {});
+        await manager.ensureSessionLoaded(updated.properties.info.id);
         return;
       }
       if (event.type === "session.idle") {
-        await manager.ensureSessionLoaded(event.properties.sessionID).catch(() => {});
+        await manager.ensureSessionLoaded(event.properties.sessionID);
         await manager.handleIdle(event.properties.sessionID);
         return;
       }
@@ -13705,7 +13723,7 @@ var MonitorPlugin = async (ctx) => {
         return;
       }
       if (event.type === "session.status") {
-        await manager.ensureSessionLoaded(event.properties.sessionID).catch(() => {});
+        await manager.ensureSessionLoaded(event.properties.sessionID);
         const idle = event.properties.status.type === "idle";
         if (idle)
           await manager.handleIdle(event.properties.sessionID);
