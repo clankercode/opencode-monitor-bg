@@ -63,6 +63,7 @@ export function makeMonitorRecord(overrides: Partial<MonitorRecord> = {}): Monit
     logPath: "/tmp/opencode-monitor/server.log",
     tagTemplate: "monitor_{id}",
     lifetime: "ephemeral",
+    truncate: 0,
     sendOnlyLatest: false,
     nextSeq: 1,
     pendingLines: [],

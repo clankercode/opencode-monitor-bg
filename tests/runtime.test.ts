@@ -1,10 +1,11 @@
 import { describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { EventEmitter } from "events";
 import os from "os";
 import path from "path";
 
 import { MonitorManager } from "../lib/runtime.ts";
+import { makeLine } from "../lib/factories.ts";
 
 type FakeChild = EventEmitter & {
   pid: number;
@@ -718,7 +719,7 @@ describe("runtime", () => {
     }
   });
 
-  test("persistent monitors write a session manifest with lifetime and latest-only config", async () => {
+  test("persistent monitors write a session manifest with truncate and latest-only config", async () => {
     const fakeChild = createFakeChild(31001);
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-session-manifest-"));
     try {
@@ -739,6 +740,7 @@ describe("runtime", () => {
         triggers: [{ type: "interval", everyMs: 60_000, deliverWhenEmpty: true }],
         tagTemplate: "monitor_{id}",
         lifetime: "persistent",
+        truncate: 200,
         sendOnlyLatest: true,
       });
 
@@ -747,13 +749,14 @@ describe("runtime", () => {
       expect(manifest.monitors).toHaveLength(1);
       expect(manifest.monitors[0]?.label).toBe("heartbeat");
       expect(manifest.monitors[0]?.lifetime).toBe("persistent");
+      expect(manifest.monitors[0]?.truncate).toBe(200);
       expect(manifest.monitors[0]?.sendOnlyLatest).toBeTrue();
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });
 
-  test("ensureSessionLoaded restores persistent monitors with saved backlog and latest-only policy", async () => {
+  test("ensureSessionLoaded restores persistent monitors with latest-only policy", async () => {
     const firstChild = createFakeChild(32001);
     const secondChild = createFakeChild(32002);
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-restore-"));
@@ -794,9 +797,81 @@ describe("runtime", () => {
       expect(listed).toHaveLength(1);
       expect(listed[0]?.label).toBe("heartbeat");
       expect(listed[0]?.lifetime).toBe("persistent");
+      expect(listed[0]?.truncate).toBe(0);
       expect(listed[0]?.sendOnlyLatest).toBeTrue();
 
       const batches = await reader.fetchPending("root-restore", "heartbeat");
+      expect(batches).toHaveLength(1);
+      expect(batches[0]?.lines.map((line) => line.content)).toEqual(["new"]);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("ensureSessionLoaded preserves legacy sendOnlyLatest snapshots", async () => {
+    const secondChild = createFakeChild(32003);
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-restore-legacy-"));
+    const promptAsync = mock(async () => {});
+    try {
+      const sessionDir = path.join(tempRoot, "root-restore-legacy");
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(
+        path.join(sessionDir, "monitors.json"),
+        JSON.stringify(
+          {
+            version: 1,
+            rootSessionID: "root-restore-legacy",
+            monitors: [
+              {
+                ownerSessionID: "root-restore-legacy",
+                label: "heartbeat",
+                monitorId: "m2",
+                command: "while true; do echo ok; sleep 1; done",
+                pid: 32002,
+                capture: "stdout",
+                outputFormat: "compact",
+                triggers: [{ type: "idle" }],
+                cwd: "/tmp",
+                env: {},
+                logPath: path.join(sessionDir, "heartbeat.log"),
+                stdoutPath: path.join(sessionDir, "heartbeat.stdout.log"),
+                stderrPath: path.join(sessionDir, "heartbeat.stderr.log"),
+                stdoutOffset: 0,
+                stderrOffset: 0,
+                stdoutRemainder: "",
+                stderrRemainder: "",
+                tagTemplate: "monitor_{id}",
+                lifetime: "persistent",
+                sendOnlyLatest: true,
+                nextSeq: 1,
+                pendingLines: [
+                  makeLine({ content: "old" }),
+                  makeLine({ content: "new", ingestedAt: makeLine().ingestedAt + 1_000 }),
+                ],
+                status: "running",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+      );
+
+      const reader = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync,
+        getRootSessionID: async () => "root-restore-legacy",
+        now: () => Date.parse("2026-04-22T01:11:00Z"),
+        spawnProcess: (() => secondChild) as any,
+      });
+
+      await reader.ensureSessionLoaded("root-restore-legacy");
+      const listed = await reader.listMonitors("root-restore-legacy");
+      expect(listed).toHaveLength(1);
+      expect(listed[0]?.truncate).toBe(0);
+      expect(listed[0]?.sendOnlyLatest).toBeTrue();
+
+      const batches = await reader.fetchPending("root-restore-legacy", "heartbeat");
       expect(batches).toHaveLength(1);
       expect(batches[0]?.lines.map((line) => line.content)).toEqual(["new"]);
     } finally {
@@ -837,7 +912,7 @@ describe("runtime", () => {
                 stderrRemainder: "",
                 tagTemplate: "monitor_{id}",
                 lifetime: "persistent",
-                sendOnlyLatest: false,
+                truncate: 0,
                 nextSeq: 1,
                 pendingLines: [],
                 status: "running",
@@ -901,7 +976,7 @@ describe("runtime", () => {
                 stderrRemainder: "",
                 tagTemplate: "monitor_{id}",
                 lifetime: "persistent",
-                sendOnlyLatest: false,
+                truncate: 0,
                 nextSeq: 1,
                 pendingLines: [],
                 status: "running",

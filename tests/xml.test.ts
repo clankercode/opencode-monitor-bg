@@ -86,4 +86,34 @@ describe("xml", () => {
     expect(xml).toContain('+0.00s stdout: done');
     expect(xml).toContain('+2.00s [exit=0]');
   });
+
+  test("formatBatchXml truncates long lines when truncate is at least one", () => {
+    const xml = formatBatchXml({
+      record: makeMonitorRecord({ monitorId: "m17", truncate: 5 }),
+      batch: {
+        monitorId: "m17",
+        seq: 6,
+        lines: [makeLine({ content: "abcdefgh" })],
+        exit: undefined,
+      },
+    });
+
+    expect(xml).toContain("stdout: abcde…");
+    expect(xml).not.toContain("abcdefgh");
+  });
+
+  test("formatBatchXml does not truncate lines when truncate is below one", () => {
+    const xml = formatBatchXml({
+      record: makeMonitorRecord({ monitorId: "m17", truncate: 0 }),
+      batch: {
+        monitorId: "m17",
+        seq: 7,
+        lines: [makeLine({ content: "abcdefgh" })],
+        exit: undefined,
+      },
+    });
+
+    expect(xml).toContain("stdout: abcdefgh");
+    expect(xml).not.toContain("abcde…");
+  });
 });

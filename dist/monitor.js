@@ -12365,9 +12365,14 @@ function formatExitEvent(exit) {
     parts.push(`signal=${escapeXml(exit.signal)}`);
   return `[${parts.join(" ")}]`;
 }
+function truncateLine(content, limit) {
+  if (limit < 1 || content.length <= limit)
+    return content;
+  return `${content.slice(0, limit)}\u2026`;
+}
 function formatContentLine(record2, line) {
   const prefix = record2.capture === "both" ? `${line.stream}: ` : "";
-  return `${prefix}${escapeXml(line.content)}`;
+  return `${prefix}${escapeXml(truncateLine(line.content, record2.truncate))}`;
 }
 function formatTimedLine(text, includeOffset, at, baseMs) {
   return includeOffset ? `${formatRelativeSeconds(at, baseMs)} ${text}` : text;
@@ -12612,6 +12617,13 @@ function flushRemainder(state) {
 }
 
 // lib/runtime.ts
+function normalizeTruncate(value) {
+  if (typeof value !== "number" || !Number.isFinite(value))
+    return 0;
+  const normalized = Math.floor(value);
+  return normalized >= 1 ? normalized : 0;
+}
+
 class MonitorManager {
   now;
   stateRoot;
@@ -12731,6 +12743,7 @@ class MonitorManager {
         logPath: this.defaultLogPath(rootSessionID, input.label),
         tagTemplate: input.tagTemplate,
         lifetime,
+        truncate: normalizeTruncate(input.truncate),
         sendOnlyLatest: input.sendOnlyLatest ?? false,
         requestedMonitorId: input.requestedId,
         nextSeq: 1,
@@ -12753,6 +12766,7 @@ class MonitorManager {
       stdoutPath: runtime.stdoutPath,
       stderrPath: runtime.stderrPath,
       lifetime: runtime.record.lifetime,
+      truncate: runtime.record.truncate,
       sendOnlyLatest: runtime.record.sendOnlyLatest
     });
     return this.toSummary(runtime);
@@ -13285,6 +13299,7 @@ class MonitorManager {
       logPath: runtime.record.logPath,
       tagTemplate: runtime.record.tagTemplate,
       lifetime: runtime.record.lifetime,
+      truncate: runtime.record.truncate,
       sendOnlyLatest: runtime.record.sendOnlyLatest,
       requestedMonitorId: runtime.record.requestedMonitorId
     };
@@ -13314,7 +13329,8 @@ class MonitorManager {
         logPath: snapshot.logPath,
         tagTemplate: snapshot.tagTemplate,
         lifetime: snapshot.lifetime,
-        sendOnlyLatest: snapshot.sendOnlyLatest,
+        truncate: normalizeTruncate(snapshot.truncate),
+        sendOnlyLatest: snapshot.sendOnlyLatest ?? (typeof snapshot.truncate === "boolean" ? snapshot.truncate : false),
         requestedMonitorId: snapshot.requestedMonitorId,
         nextSeq: snapshot.nextSeq,
         pendingLines: snapshot.pendingLines,
@@ -13370,6 +13386,7 @@ class MonitorManager {
       stderrRemainder: runtime.stderrCollector.remainder,
       tagTemplate: runtime.record.tagTemplate,
       lifetime: runtime.record.lifetime,
+      truncate: runtime.record.truncate,
       sendOnlyLatest: runtime.record.sendOnlyLatest,
       requestedMonitorId: runtime.record.requestedMonitorId,
       nextSeq: runtime.scheduler.nextSeq,
@@ -13597,6 +13614,16 @@ var MonitorPlugin = async (ctx) => {
       });
     } catch {}
   };
+  const syncSessionIdleState = async (sessionID, statuses) => {
+    const nextStatuses = statuses ?? ((await ctx.client.session.status?.())?.data ?? {});
+    const status = nextStatuses[sessionID];
+    if (!status)
+      return;
+    if (status.type === "idle")
+      await manager.handleIdle(sessionID);
+    else
+      await manager.handleActivity(sessionID);
+  };
   const startRestoreScan = () => {
     let attemptsRemaining = 60;
     const tick = async () => {
@@ -13609,6 +13636,7 @@ var MonitorPlugin = async (ctx) => {
         await Promise.all(Object.keys(statuses).map(async (sessionID) => {
           try {
             await manager.ensureSessionLoaded(sessionID);
+            await syncSessionIdleState(sessionID, statuses);
           } catch (error45) {
             await reportRestoreError(sessionID, error45);
           }
@@ -13637,6 +13665,7 @@ var MonitorPlugin = async (ctx) => {
           tagTemplate: tool.schema.string().default("monitor_{id}"),
           lifetime: tool.schema.enum(["ephemeral", "persistent"]).default("ephemeral"),
           requestedId: tool.schema.string().optional(),
+          truncate: tool.schema.number().default(0),
           send_only_latest: tool.schema.boolean().default(false),
           triggers: tool.schema.array(tool.schema.union([
             tool.schema.object({ type: tool.schema.literal("line"), windowMs: tool.schema.number().optional() }),
@@ -13652,6 +13681,7 @@ var MonitorPlugin = async (ctx) => {
         },
         async execute(args, context) {
           await manager.ensureSessionLoaded(context.sessionID);
+          await syncSessionIdleState(context.sessionID);
           const summary = await manager.startMonitor({
             ownerSessionID: context.sessionID,
             label: args.label,
@@ -13664,6 +13694,7 @@ var MonitorPlugin = async (ctx) => {
             tagTemplate: args.tagTemplate,
             lifetime: args.lifetime,
             requestedId: args.requestedId,
+            truncate: args.truncate,
             sendOnlyLatest: args.send_only_latest
           });
           return {

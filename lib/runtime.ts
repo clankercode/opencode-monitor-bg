@@ -54,6 +54,7 @@ export interface StartMonitorInput {
   tagTemplate: string;
   lifetime?: MonitorLifetime;
   requestedId?: string;
+  truncate?: number;
   sendOnlyLatest?: boolean;
 }
 
@@ -72,8 +73,15 @@ export interface MonitorSummary {
   logPath: string;
   tagTemplate: string;
   lifetime: MonitorLifetime;
+  truncate: number;
   sendOnlyLatest: boolean;
   requestedMonitorId?: string;
+}
+
+function normalizeTruncate(value: number | boolean | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  const normalized = Math.floor(value);
+  return normalized >= 1 ? normalized : 0;
 }
 
 export interface MonitorManagerOptions {
@@ -243,6 +251,7 @@ export class MonitorManager {
         logPath: this.defaultLogPath(rootSessionID, input.label),
         tagTemplate: input.tagTemplate,
         lifetime,
+        truncate: normalizeTruncate(input.truncate),
         sendOnlyLatest: input.sendOnlyLatest ?? false,
         requestedMonitorId: input.requestedId,
         nextSeq: 1,
@@ -265,6 +274,7 @@ export class MonitorManager {
       stdoutPath: runtime.stdoutPath,
       stderrPath: runtime.stderrPath,
       lifetime: runtime.record.lifetime,
+      truncate: runtime.record.truncate,
       sendOnlyLatest: runtime.record.sendOnlyLatest,
     });
     return this.toSummary(runtime);
@@ -832,6 +842,7 @@ export class MonitorManager {
       logPath: runtime.record.logPath,
       tagTemplate: runtime.record.tagTemplate,
       lifetime: runtime.record.lifetime,
+      truncate: runtime.record.truncate,
       sendOnlyLatest: runtime.record.sendOnlyLatest,
       requestedMonitorId: runtime.record.requestedMonitorId,
     };
@@ -860,7 +871,8 @@ export class MonitorManager {
         logPath: snapshot.logPath,
         tagTemplate: snapshot.tagTemplate,
         lifetime: snapshot.lifetime,
-        sendOnlyLatest: snapshot.sendOnlyLatest,
+        truncate: normalizeTruncate(snapshot.truncate),
+        sendOnlyLatest: snapshot.sendOnlyLatest ?? (typeof snapshot.truncate === "boolean" ? snapshot.truncate : false),
         requestedMonitorId: snapshot.requestedMonitorId,
         nextSeq: snapshot.nextSeq,
         pendingLines: snapshot.pendingLines,
@@ -928,6 +940,7 @@ export class MonitorManager {
       stderrRemainder: runtime.stderrCollector.remainder,
       tagTemplate: runtime.record.tagTemplate,
       lifetime: runtime.record.lifetime,
+      truncate: runtime.record.truncate,
       sendOnlyLatest: runtime.record.sendOnlyLatest,
       requestedMonitorId: runtime.record.requestedMonitorId,
       nextSeq: runtime.scheduler.nextSeq,
