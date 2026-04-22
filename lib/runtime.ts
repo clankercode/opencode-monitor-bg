@@ -148,6 +148,9 @@ export class MonitorManager {
     for (const entry of readdirSync(this.stateRoot, { withFileTypes: true })) {
       const entryPath = path.join(this.stateRoot, entry.name);
       if (entry.isDirectory()) {
+        const hasPersistentState =
+          existsSync(path.join(entryPath, "monitors.json")) || existsSync(path.join(entryPath, "monitors.lease.json"));
+        if (hasPersistentState) continue;
         for (const nested of readdirSync(entryPath, { withFileTypes: true })) {
           const nestedPath = path.join(entryPath, nested.name);
           if (nested.name === "monitors.json" || nested.name === "monitors.lease.json") continue;

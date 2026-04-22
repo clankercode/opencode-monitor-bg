@@ -616,6 +616,32 @@ describe("runtime", () => {
     }
   });
 
+  test("cleanupLogs preserves session directories that still have persistent state", async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-cleanup-"));
+    try {
+      const sessionDir = path.join(tempRoot, "root-cleanup");
+      mkdirSync(sessionDir, { recursive: true });
+      await Bun.write(
+        path.join(sessionDir, "monitors.json"),
+        JSON.stringify({ version: 1, rootSessionID: "root-cleanup", monitors: [] }),
+      );
+      await Bun.write(path.join(sessionDir, "old.log"), "stale\n");
+
+      const manager = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync: async () => {},
+        getRootSessionID: async () => "root-cleanup",
+        now: () => Date.parse("2026-04-22T02:00:00Z"),
+      });
+
+      manager.cleanupLogs(0);
+
+      expect(readFileSync(path.join(sessionDir, "old.log"), "utf8")).toContain("stale");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test("detached monitor process survives launcher exit until explicitly killed", async () => {
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-persist-"));
     const script = [

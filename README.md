@@ -44,6 +44,7 @@ bun run build
 - State files default to `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/`.
 - Persistent monitor manifests live at `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/<rootSessionID>/monitors.json`.
 - Per-session ownership leases live at `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/<rootSessionID>/monitors.lease.json`.
+- Startup cleanup skips any session directory that still has a monitor manifest or lease, so persistent sessions do not lose capture files just because they are old.
 - Override log root with `MONITOR_LOG_DIR`.
 - Background command output is captured via per-monitor state files instead of parent-owned stdout/stderr pipes, so quiet loops keep running even if the plugin host restarts.
 - `monitor_start` accepts `lifetime: "ephemeral" | "persistent"` and defaults to `ephemeral`.
