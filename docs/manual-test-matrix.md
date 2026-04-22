@@ -53,6 +53,14 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Verify log files are created.
 - Verify log lines include readable timestamps and stream names.
 
+12. Detached lifecycle robustness
+- Verify a long-silent process survives after the launcher process exits.
+- Verify the next emitted line is still captured after that detach boundary.
+
+13. Debug logging
+- Verify `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/plugin-debug.jsonl` is created by default.
+- Verify `PLUGIN_OC_MONITOR_DEBUG_LOG=0` suppresses debug-log writes.
+
 ## Planned Live Scenarios
 
 ### Scenario A: Long interval stream
@@ -83,6 +91,16 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Start a buffered monitor with long debounce.
 - Use `monitor_fetch` twice.
 - Expect first fetch to return lines and second fetch to return nothing.
+
+### Scenario G: Quiet loop persistence
+- Start a process like `while sleep 240; do echo blah; done`.
+- Leave it idle long enough that the next `echo` would previously have hit a broken pipe after host teardown.
+- Expect the process to stay alive and the next emitted line to be captured.
+
+### Scenario H: Debug JSONL
+- Start any monitor with default settings.
+- Confirm `plugin-debug.jsonl` appears under the monitor state root and records start, delivery, and exit events.
+- Repeat with `PLUGIN_OC_MONITOR_DEBUG_LOG=0` and expect no new debug entries.
 
 ## Notes
 

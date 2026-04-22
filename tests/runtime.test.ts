@@ -1,5 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { EventEmitter } from "events";
+import os from "os";
+import path from "path";
 
 import { MonitorManager } from "../lib/runtime.ts";
 
@@ -574,5 +577,89 @@ describe("runtime", () => {
     fakeChild.stdout.emit("data", Buffer.from("world\n"));
     await manager.handleIdle("root-10");
     expect(promptAsync).toHaveBeenCalledTimes(2);
+  });
+
+  test("writes debug jsonl when enabled", async () => {
+    const fakeChild = createFakeChild();
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-debug-"));
+    const debugLogPath = path.join(tempRoot, "plugin-debug.jsonl");
+    const promptAsync = mock(async () => {});
+    try {
+      const manager = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync,
+        getRootSessionID: async () => "root-debug",
+        now: () => Date.parse("2026-04-21T12:00:00Z"),
+        spawnProcess: (() => fakeChild) as any,
+        debugEnabled: true,
+        debugLogPath,
+      });
+
+      await manager.startMonitor({
+        ownerSessionID: "root-debug",
+        label: "server",
+        command: "ignored",
+        capture: "stdout",
+        cwd: "/tmp",
+        triggers: [{ type: "idle" }],
+        tagTemplate: "monitor_{id}",
+      });
+
+      fakeChild.stdout.emit("data", Buffer.from("hello\n"));
+      await manager.handleIdle("root-debug");
+
+      const contents = readFileSync(debugLogPath, "utf8");
+      expect(contents).toContain('"event":"monitor.start"');
+      expect(contents).toContain('"event":"delivery.success"');
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("detached monitor process survives launcher exit until explicitly killed", async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-persist-"));
+    const script = [
+      `import { MonitorManager } from ${JSON.stringify(path.join(process.cwd(), "lib/runtime.ts"))};`,
+      `const manager = new MonitorManager({`,
+      `  stateRoot: ${JSON.stringify(tempRoot)},`,
+      `  promptAsync: async () => {},`,
+      `  getRootSessionID: async () => "root-persist",`,
+      `});`,
+      `const summary = await manager.startMonitor({`,
+      `  ownerSessionID: "root-persist",`,
+      `  label: "loop",`,
+      `  command: "while sleep 0.2; do echo blah; done",`,
+      `  capture: "stdout",`,
+      `  cwd: "/tmp",`,
+      `  triggers: [{ type: "line", windowMs: 5_000 }],`,
+      `  tagTemplate: "monitor_{id}",`,
+      `});`,
+      `console.log(String(summary.pid));`,
+      `setTimeout(() => process.exit(0), 100);`,
+    ].join("\n");
+    const proc = Bun.spawn(["bun", "--eval", script], {
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdoutText = await new Response(proc.stdout).text();
+    const stderrText = await new Response(proc.stderr).text();
+    await proc.exited;
+
+    const pid = Number(stdoutText.trim());
+    expect(stderrText).toBe("");
+    expect(Number.isInteger(pid)).toBeTrue();
+
+    try {
+      await Bun.sleep(650);
+      expect(() => process.kill(pid, 0)).not.toThrow();
+    } finally {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        // best effort cleanup
+      }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });

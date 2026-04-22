@@ -31,8 +31,12 @@ bun run build
 
 ## Notes
 
-- Logs default to `~/.local/state/opencode-monitor/`.
+- State files default to `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/`.
 - Override log root with `MONITOR_LOG_DIR`.
+- Background command output is captured via per-monitor state files instead of parent-owned stdout/stderr pipes, so quiet loops keep running even if the plugin host restarts.
+- Debug logging writes JSONL to `${MONITOR_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor}/plugin-debug.jsonl`.
+- `PLUGIN_OC_MONITOR_DEBUG_LOG=1` enables debug logging, and it is currently default-on when unset.
+- Set `PLUGIN_OC_MONITOR_DEBUG_LOG=0` to disable the debug JSONL once you no longer need lifecycle traces.
 - XML tags are templated and sanitized from `tagTemplate`.
 - Model-facing XML uses readable UTC date-time strings without milliseconds.
 - `outputFormat` defaults to `compact`; `very-compact` drops sequence and label attrs.

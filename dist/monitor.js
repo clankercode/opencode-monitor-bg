@@ -12330,10 +12330,122 @@ function tool(input) {
   return input;
 }
 tool.schema = exports_external;
+// lib/debug.ts
+import { appendFileSync, mkdirSync } from "fs";
+import path from "path";
+
+// lib/xml.ts
+function escapeXml(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
+}
+function formatDateTime(epochMs) {
+  return new Date(epochMs).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+function formatRelativeSeconds(epochMs, baseMs) {
+  const seconds = Math.max(0, epochMs - baseMs) / 1000;
+  return `+${seconds.toFixed(2)}s`;
+}
+function formatBatchAttrs(record2, batch, batchAt) {
+  if (record2.outputFormat === "very-compact") {
+    return `id=${escapeXml(record2.monitorId)} at="${formatDateTime(batchAt)}"`;
+  }
+  return `id=${escapeXml(record2.monitorId)} seq=${batch.seq} label="${escapeXml(record2.label)}" at="${formatDateTime(batchAt)}"`;
+}
+function formatExitEvent(exit) {
+  const parts = [];
+  if (exit.exitCode === null)
+    parts.push("exit");
+  else
+    parts.push(`exit=${exit.exitCode}`);
+  if (exit.signal)
+    parts.push(`signal=${escapeXml(exit.signal)}`);
+  return `[${parts.join(" ")}]`;
+}
+function formatContentLine(record2, line) {
+  const prefix = record2.capture === "both" ? `${line.stream}: ` : "";
+  return `${prefix}${escapeXml(line.content)}`;
+}
+function formatTimedLine(text, includeOffset, at, baseMs) {
+  return includeOffset ? `${formatRelativeSeconds(at, baseMs)} ${text}` : text;
+}
+function formatTagName(template, values) {
+  const rendered = template.replaceAll("{id}", values.id).replaceAll("{label}", values.label);
+  const sanitized = rendered.replaceAll(/[^A-Za-z0-9_.-]/g, "_");
+  if (!sanitized)
+    return "monitor_update";
+  return /^[A-Za-z_]/.test(sanitized) ? sanitized : `m_${sanitized}`;
+}
+function formatBatchXml(input) {
+  const tag = formatTagName(input.record.tagTemplate, {
+    id: input.record.monitorId,
+    label: input.record.label
+  });
+  const firstLineAt = input.batch.lines[0]?.ingestedAt;
+  const batchAt = firstLineAt ?? input.batch.exit?.occurredAt ?? 0;
+  const attrs = formatBatchAttrs(input.record, input.batch, batchAt);
+  if (input.batch.lines.length === 0 && input.batch.exit) {
+    return `<${tag}_exit ${attrs}>
+${formatExitEvent(input.batch.exit)}
+</${tag}_exit>`;
+  }
+  const includeOffsets = input.batch.lines.length > 1 || input.batch.lines.length === 1 && Boolean(input.batch.exit);
+  const linesXml = input.batch.lines.map((line) => formatTimedLine(formatContentLine(input.record, line), includeOffsets, line.ingestedAt, batchAt)).join(`
+`);
+  const exitXml = input.batch.exit ? `
+${formatTimedLine(formatExitEvent(input.batch.exit), includeOffsets, input.batch.exit.occurredAt, batchAt)}` : "";
+  return `<${tag} ${attrs}>
+${linesXml}${exitXml}
+</${tag}>`;
+}
+
+// lib/debug.ts
+var MONITOR_LOG_DIR_ENV = "MONITOR_LOG_DIR";
+var DEBUG_LOG_ENV = "PLUGIN_OC_MONITOR_DEBUG_LOG";
+function defaultStateRoot(env = process.env) {
+  const configured = env[MONITOR_LOG_DIR_ENV];
+  if (configured)
+    return configured;
+  const home = env.HOME ?? "/tmp";
+  const xdgStateHome = env.XDG_STATE_HOME;
+  const stateHome = xdgStateHome && path.isAbsolute(xdgStateHome) ? xdgStateHome : path.join(home, ".local", "state");
+  return path.join(stateHome, "opencode-monitor");
+}
+function defaultDebugLogPath(stateRoot) {
+  return path.join(stateRoot, "plugin-debug.jsonl");
+}
+function debugLoggingEnabled(env = process.env) {
+  const raw = env[DEBUG_LOG_ENV];
+  if (!raw)
+    return true;
+  return !/^(0|false|off|no)$/i.test(raw);
+}
+function appendDebugLog(logPath, now, event, details = {}) {
+  try {
+    mkdirSync(path.dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify({
+      at: formatDateTime(now),
+      event,
+      pid: process.pid,
+      ...details
+    })}
+`);
+  } catch {}
+}
+
 // lib/runtime.ts
 import { spawn } from "child_process";
-import { mkdirSync, readdirSync, rmSync, statSync, createWriteStream } from "fs";
-import path from "path";
+import {
+  closeSync,
+  createWriteStream,
+  mkdirSync as mkdirSync2,
+  openSync,
+  readSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  watch
+} from "fs";
+import path2 from "path";
 
 // lib/core.ts
 function hasPending(state) {
@@ -12489,70 +12601,6 @@ function flushRemainder(state) {
   };
 }
 
-// lib/xml.ts
-function escapeXml(value) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
-}
-function formatDateTime(epochMs) {
-  return new Date(epochMs).toISOString().replace(/\.\d{3}Z$/, "Z");
-}
-function formatRelativeSeconds(epochMs, baseMs) {
-  const seconds = Math.max(0, epochMs - baseMs) / 1000;
-  return `+${seconds.toFixed(2)}s`;
-}
-function formatBatchAttrs(record2, batch, batchAt) {
-  if (record2.outputFormat === "very-compact") {
-    return `id=${escapeXml(record2.monitorId)} at="${formatDateTime(batchAt)}"`;
-  }
-  return `id=${escapeXml(record2.monitorId)} seq=${batch.seq} label="${escapeXml(record2.label)}" at="${formatDateTime(batchAt)}"`;
-}
-function formatExitEvent(exit) {
-  const parts = [];
-  if (exit.exitCode === null)
-    parts.push("exit");
-  else
-    parts.push(`exit=${exit.exitCode}`);
-  if (exit.signal)
-    parts.push(`signal=${escapeXml(exit.signal)}`);
-  return `[${parts.join(" ")}]`;
-}
-function formatContentLine(record2, line) {
-  const prefix = record2.capture === "both" ? `${line.stream}: ` : "";
-  return `${prefix}${escapeXml(line.content)}`;
-}
-function formatTimedLine(text, includeOffset, at, baseMs) {
-  return includeOffset ? `${formatRelativeSeconds(at, baseMs)} ${text}` : text;
-}
-function formatTagName(template, values) {
-  const rendered = template.replaceAll("{id}", values.id).replaceAll("{label}", values.label);
-  const sanitized = rendered.replaceAll(/[^A-Za-z0-9_.-]/g, "_");
-  if (!sanitized)
-    return "monitor_update";
-  return /^[A-Za-z_]/.test(sanitized) ? sanitized : `m_${sanitized}`;
-}
-function formatBatchXml(input) {
-  const tag = formatTagName(input.record.tagTemplate, {
-    id: input.record.monitorId,
-    label: input.record.label
-  });
-  const firstLineAt = input.batch.lines[0]?.ingestedAt;
-  const batchAt = firstLineAt ?? input.batch.exit?.occurredAt ?? 0;
-  const attrs = formatBatchAttrs(input.record, input.batch, batchAt);
-  if (input.batch.lines.length === 0 && input.batch.exit) {
-    return `<${tag}_exit ${attrs}>
-${formatExitEvent(input.batch.exit)}
-</${tag}_exit>`;
-  }
-  const includeOffsets = input.batch.lines.length > 1 || input.batch.lines.length === 1 && Boolean(input.batch.exit);
-  const linesXml = input.batch.lines.map((line) => formatTimedLine(formatContentLine(input.record, line), includeOffsets, line.ingestedAt, batchAt)).join(`
-`);
-  const exitXml = input.batch.exit ? `
-${formatTimedLine(formatExitEvent(input.batch.exit), includeOffsets, input.batch.exit.occurredAt, batchAt)}` : "";
-  return `<${tag} ${attrs}>
-${linesXml}${exitXml}
-</${tag}>`;
-}
-
 // lib/runtime.ts
 class MonitorManager {
   now;
@@ -12562,6 +12610,8 @@ class MonitorManager {
   spawnProcess;
   setTimer;
   clearTimer;
+  debugEnabled;
+  debugLogPath;
   bySession = new Map;
   sessionIdle = new Map;
   primeState = { nextCandidate: 2, queue: [] };
@@ -12574,15 +12624,17 @@ class MonitorManager {
     this.spawnProcess = options.spawnProcess ?? spawn;
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.debugEnabled = options.debugEnabled ?? false;
+    this.debugLogPath = options.debugLogPath;
   }
   cleanupLogs(olderThanMs = 7 * 24 * 60 * 60 * 1000) {
-    mkdirSync(this.stateRoot, { recursive: true });
+    mkdirSync2(this.stateRoot, { recursive: true });
     const cutoff = this.now() - olderThanMs;
     for (const entry of readdirSync(this.stateRoot, { withFileTypes: true })) {
-      const entryPath = path.join(this.stateRoot, entry.name);
+      const entryPath = path2.join(this.stateRoot, entry.name);
       if (entry.isDirectory()) {
         for (const nested of readdirSync(entryPath, { withFileTypes: true })) {
-          const nestedPath = path.join(entryPath, nested.name);
+          const nestedPath = path2.join(entryPath, nested.name);
           if (nested.isFile() && statSync(nestedPath).mtimeMs < cutoff)
             rmSync(nestedPath);
         }
@@ -12621,16 +12673,21 @@ class MonitorManager {
       primeState: this.primeState
     });
     this.primeState = allocated.primeState;
-    const sessionDir = path.join(this.stateRoot, rootSessionID);
-    mkdirSync(sessionDir, { recursive: true });
-    const logPath = path.join(sessionDir, `${input.label}.log`);
-    const child = this.spawnProcess(input.command, {
+    const sessionDir = path2.join(this.stateRoot, rootSessionID);
+    mkdirSync2(sessionDir, { recursive: true });
+    const logPath = path2.join(sessionDir, `${input.label}.log`);
+    const stdoutPath = path2.join(sessionDir, `${input.label}.stdout.log`);
+    const stderrPath = path2.join(sessionDir, `${input.label}.stderr.log`);
+    this.ensureFile(stdoutPath);
+    this.ensureFile(stderrPath);
+    const child = this.spawnProcess(this.buildCapturedCommand(input.command, stdoutPath, stderrPath), {
       cwd: input.cwd,
       env: { ...process.env, ...input.env },
       shell: true,
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: "ignore"
     });
+    child.unref?.();
     const record2 = {
       ownerSessionID: rootSessionID,
       label: input.label,
@@ -12655,6 +12712,12 @@ class MonitorManager {
       scheduler: { pendingLines: [], nextSeq: 1 },
       stdoutCollector: { remainder: "" },
       stderrCollector: { remainder: "" },
+      stdoutPath,
+      stderrPath,
+      stdoutOffset: 0,
+      stderrOffset: 0,
+      stdoutWatcher: null,
+      stderrWatcher: null,
       logStream: createWriteStream(logPath, { flags: "a" }),
       logFailed: false,
       draining: null,
@@ -12668,9 +12731,20 @@ class MonitorManager {
       runtime.logFailed = true;
     });
     this.attachProcess(runtime);
+    this.attachFileWatchers(runtime);
     this.setupIntervalTimers(runtime);
     existing.set(input.label, runtime);
     this.bySession.set(rootSessionID, existing);
+    this.logDebug("monitor.start", {
+      ownerSessionID: rootSessionID,
+      label: input.label,
+      monitorId: record2.monitorId,
+      pid: record2.pid,
+      cwd: input.cwd,
+      logPath,
+      stdoutPath,
+      stderrPath
+    });
     return this.toSummary(runtime);
   }
   async listMonitors(sessionID, label) {
@@ -12690,6 +12764,7 @@ class MonitorManager {
     const batches = [];
     for (const monitor of values) {
       await this.serializedDrain(monitor, async () => {
+        this.drainCapturedFiles(monitor);
         const decision = decideManualFetch(monitor.scheduler);
         if (!decision.deliverNow)
           return;
@@ -12711,12 +12786,20 @@ class MonitorManager {
       throw new Error(`Unknown monitor '${label}'.`);
     monitor.record.status = "killed";
     monitor.removalPending = true;
+    this.logDebug("monitor.kill", {
+      ownerSessionID: rootSessionID,
+      label,
+      monitorId: monitor.record.monitorId,
+      pid: monitor.record.pid,
+      signal
+    });
     this.killProcessTree(monitor, signal);
     return this.toSummary(monitor);
   }
   async handleIdle(sessionID) {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     this.setSessionIdle(rootSessionID, true);
+    this.logDebug("session.idle", { sessionID, rootSessionID });
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors)
       return;
@@ -12725,6 +12808,7 @@ class MonitorManager {
   async handleActivity(sessionID) {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     this.setSessionIdle(rootSessionID, false);
+    this.logDebug("session.active", { sessionID, rootSessionID });
   }
   async deleteSession(sessionID) {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
@@ -12755,6 +12839,7 @@ class MonitorManager {
     });
     runtime.process.on("close", (code, signal) => {
       this.clearScheduledTimers(runtime);
+      this.drainCapturedFiles(runtime);
       if (runtime.removalPending) {
         this.closeLogStream(runtime);
         this.removeRuntime(runtime);
@@ -12774,8 +12859,20 @@ class MonitorManager {
       };
       runtime.record.pendingExit = runtime.scheduler.pendingExit;
       runtime.record.pendingLines = runtime.scheduler.pendingLines;
+      this.logDebug("process.close", {
+        ownerSessionID: runtime.record.ownerSessionID,
+        label: runtime.record.label,
+        monitorId: runtime.record.monitorId,
+        pid: runtime.record.pid,
+        code,
+        signal: signal ?? null
+      });
       this.fireAndForgetDeliver(runtime, "exit");
     });
+  }
+  attachFileWatchers(runtime) {
+    runtime.stdoutWatcher = this.watchStreamFile(runtime, "stdout", runtime.stdoutPath);
+    runtime.stderrWatcher = this.watchStreamFile(runtime, "stderr", runtime.stderrPath);
   }
   ingestLine(runtime, stream, content) {
     if (runtime.closed || runtime.removalPending)
@@ -12795,6 +12892,14 @@ class MonitorManager {
       runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}
 `);
     }
+    this.logDebug("line.ingested", {
+      ownerSessionID: runtime.record.ownerSessionID,
+      label: runtime.record.label,
+      monitorId: runtime.record.monitorId,
+      stream,
+      pendingCount: runtime.scheduler.pendingLines.length,
+      contentBytes: Buffer.byteLength(content)
+    });
     const decision = decideLineEvent({
       state: runtime.scheduler,
       line,
@@ -12813,6 +12918,7 @@ class MonitorManager {
   }
   async tryAutoDeliver(runtime, reason) {
     await this.serializedDrain(runtime, async () => {
+      this.drainCapturedFiles(runtime);
       const decision = reason === "idle" ? decideTimeEvent({
         state: runtime.scheduler,
         triggers: runtime.record.triggers,
@@ -12830,17 +12936,44 @@ class MonitorManager {
         return;
       const before = runtime.scheduler;
       const committed = commitDelivery({ state: runtime.scheduler, monitorId: runtime.record.monitorId });
+      this.logDebug("delivery.attempt", {
+        ownerSessionID: runtime.record.ownerSessionID,
+        label: runtime.record.label,
+        monitorId: runtime.record.monitorId,
+        reason,
+        seq: committed.batch.seq,
+        lineCount: committed.batch.lines.length,
+        hasExit: Boolean(committed.batch.exit)
+      });
       try {
         await this.promptAsync(runtime.record.ownerSessionID, formatBatchXml({ record: runtime.record, batch: committed.batch }));
         runtime.scheduler = committed.state;
         runtime.record.nextSeq = committed.state.nextSeq;
         runtime.record.pendingLines = committed.state.pendingLines;
         runtime.record.pendingExit = committed.state.pendingExit;
+        this.logDebug("delivery.success", {
+          ownerSessionID: runtime.record.ownerSessionID,
+          label: runtime.record.label,
+          monitorId: runtime.record.monitorId,
+          reason,
+          seq: committed.batch.seq,
+          lineCount: committed.batch.lines.length,
+          hasExit: Boolean(committed.batch.exit)
+        });
         this.finalizeCompletedRuntime(runtime);
       } catch {
         runtime.scheduler = before;
         runtime.record.pendingLines = before.pendingLines;
         runtime.record.pendingExit = before.pendingExit;
+        this.logDebug("delivery.failure", {
+          ownerSessionID: runtime.record.ownerSessionID,
+          label: runtime.record.label,
+          monitorId: runtime.record.monitorId,
+          reason,
+          seq: committed.batch.seq,
+          lineCount: committed.batch.lines.length,
+          hasExit: Boolean(committed.batch.exit)
+        });
         throw new Error("promptAsync delivery failed");
       }
     });
@@ -12857,6 +12990,7 @@ class MonitorManager {
   killProcessTree(runtime, signal) {
     runtime.destroyed = true;
     this.clearScheduledTimers(runtime);
+    this.closeWatchers(runtime);
     const pid = runtime.process.pid;
     if (!pid)
       return;
@@ -12957,11 +13091,19 @@ class MonitorManager {
       return;
     runtime.destroyed = true;
     this.clearScheduledTimers(runtime);
+    this.closeWatchers(runtime);
     this.closeLogStream(runtime);
     const monitors = this.bySession.get(runtime.record.ownerSessionID);
     monitors?.delete(runtime.record.label);
     if (monitors && monitors.size === 0)
       this.bySession.delete(runtime.record.ownerSessionID);
+    this.logDebug("monitor.remove", {
+      ownerSessionID: runtime.record.ownerSessionID,
+      label: runtime.record.label,
+      monitorId: runtime.record.monitorId,
+      pid: runtime.record.pid,
+      status: runtime.record.status
+    });
   }
   toSummary(runtime) {
     return {
@@ -12977,6 +13119,112 @@ class MonitorManager {
       logPath: runtime.record.logPath
     };
   }
+  fireAndForgetDrain(runtime) {
+    this.serializedDrain(runtime, async () => {
+      this.drainCapturedFiles(runtime);
+    }).catch(() => {});
+  }
+  drainCapturedFiles(runtime) {
+    this.drainCapturedStream(runtime, "stdout");
+    this.drainCapturedStream(runtime, "stderr");
+  }
+  drainCapturedStream(runtime, stream) {
+    const filePath = stream === "stdout" ? runtime.stdoutPath : runtime.stderrPath;
+    const offset = stream === "stdout" ? runtime.stdoutOffset : runtime.stderrOffset;
+    const collector = stream === "stdout" ? runtime.stdoutCollector : runtime.stderrCollector;
+    const chunk = this.readAppendedChunk(filePath, offset);
+    if (!chunk)
+      return;
+    const result = appendChunk(collector, chunk.text);
+    if (stream === "stdout") {
+      runtime.stdoutCollector = result.state;
+      runtime.stdoutOffset = chunk.nextOffset;
+    } else {
+      runtime.stderrCollector = result.state;
+      runtime.stderrOffset = chunk.nextOffset;
+    }
+    if (result.lines.length > 0) {
+      this.logDebug("capture.drain", {
+        ownerSessionID: runtime.record.ownerSessionID,
+        label: runtime.record.label,
+        monitorId: runtime.record.monitorId,
+        stream,
+        bytes: chunk.text.length,
+        lines: result.lines.length
+      });
+    }
+    for (const line of result.lines)
+      this.ingestLine(runtime, stream, line);
+  }
+  readAppendedChunk(filePath, offset) {
+    let size;
+    try {
+      size = statSync(filePath).size;
+    } catch {
+      return null;
+    }
+    const start = size < offset ? 0 : offset;
+    if (size <= start)
+      return null;
+    const fd = openSync(filePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(size - start);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
+      if (bytesRead <= 0)
+        return null;
+      return {
+        text: buffer.subarray(0, bytesRead).toString(),
+        nextOffset: start + bytesRead
+      };
+    } finally {
+      closeSync(fd);
+    }
+  }
+  watchStreamFile(runtime, stream, filePath) {
+    try {
+      return watch(filePath, { persistent: false }, (eventType) => {
+        if (runtime.closed || runtime.destroyed || runtime.removalPending)
+          return;
+        if (eventType !== "change")
+          return;
+        this.logDebug("capture.watch", {
+          ownerSessionID: runtime.record.ownerSessionID,
+          label: runtime.record.label,
+          monitorId: runtime.record.monitorId,
+          stream
+        });
+        this.fireAndForgetDrain(runtime);
+      });
+    } catch {
+      return null;
+    }
+  }
+  closeWatchers(runtime) {
+    for (const watcher of [runtime.stdoutWatcher, runtime.stderrWatcher]) {
+      if (!watcher)
+        continue;
+      try {
+        watcher.close();
+      } catch {}
+    }
+    runtime.stdoutWatcher = null;
+    runtime.stderrWatcher = null;
+  }
+  ensureFile(filePath) {
+    const fd = openSync(filePath, "a");
+    closeSync(fd);
+  }
+  buildCapturedCommand(command, stdoutPath, stderrPath) {
+    return `(${command}) >> ${this.quoteShellArg(stdoutPath)} 2>> ${this.quoteShellArg(stderrPath)}`;
+  }
+  quoteShellArg(value) {
+    return `'${value.replaceAll("'", `'\\''`)}'`;
+  }
+  logDebug(event, details = {}) {
+    if (!this.debugEnabled || !this.debugLogPath)
+      return;
+    appendDebugLog(this.debugLogPath, this.now(), event, details);
+  }
 }
 async function resolveRootSessionID(client, sessionID) {
   let current = sessionID;
@@ -12991,25 +13239,24 @@ async function resolveRootSessionID(client, sessionID) {
 }
 
 // monitor.ts
-var MONITOR_LOG_DIR_ENV = "MONITOR_LOG_DIR";
-function defaultStateRoot() {
-  const home = process.env.HOME ?? "/tmp";
-  return process.env[MONITOR_LOG_DIR_ENV] ?? `${home}/.local/state/opencode-monitor`;
-}
 var MonitorPlugin = async (ctx) => {
+  const stateRoot = defaultStateRoot();
   const manager = new MonitorManager({
-    stateRoot: defaultStateRoot(),
+    stateRoot,
     promptAsync: async (sessionID, text) => {
       await ctx.client.session.promptAsync({
         path: { id: sessionID },
         body: { parts: [{ type: "text", text }] },
-        url: "/session/{id}/prompt_async",
         throwOnError: true
       });
     },
-    getRootSessionID: async (sessionID) => resolveRootSessionID(ctx.client, sessionID)
+    getRootSessionID: async (sessionID) => resolveRootSessionID(ctx.client, sessionID),
+    debugEnabled: debugLoggingEnabled(),
+    debugLogPath: defaultDebugLogPath(stateRoot)
   });
-  manager.cleanupLogs();
+  try {
+    manager.cleanupLogs();
+  } catch {}
   return {
     tool: {
       monitor_start: tool({

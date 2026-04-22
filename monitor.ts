@@ -1,31 +1,30 @@
 import type { Event, EventSessionCreated, EventSessionDeleted } from "@opencode-ai/sdk";
 import { tool, type Plugin } from "@opencode-ai/plugin";
 
+import { debugLoggingEnabled, defaultDebugLogPath, defaultStateRoot } from "./lib/debug.ts";
 import { MonitorManager, resolveRootSessionID } from "./lib/runtime.ts";
-import { formatBatchXml } from "./lib/xml.ts";
-
-const MONITOR_LOG_DIR_ENV = "MONITOR_LOG_DIR";
-
-function defaultStateRoot(): string {
-  const home = process.env.HOME ?? "/tmp";
-  return process.env[MONITOR_LOG_DIR_ENV] ?? `${home}/.local/state/opencode-monitor`;
-}
 
 export const MonitorPlugin: Plugin = async (ctx) => {
+  const stateRoot = defaultStateRoot();
   const manager = new MonitorManager({
-    stateRoot: defaultStateRoot(),
+    stateRoot,
     promptAsync: async (sessionID, text) => {
-      await (ctx.client.session as any).promptAsync({
+      await ctx.client.session.promptAsync({
         path: { id: sessionID },
         body: { parts: [{ type: "text", text }] },
-        url: "/session/{id}/prompt_async",
         throwOnError: true,
       });
     },
-    getRootSessionID: async (sessionID) => resolveRootSessionID(ctx.client as any, sessionID),
+    getRootSessionID: async (sessionID) => resolveRootSessionID(ctx.client, sessionID),
+    debugEnabled: debugLoggingEnabled(),
+    debugLogPath: defaultDebugLogPath(stateRoot),
   });
 
-  manager.cleanupLogs();
+  try {
+    manager.cleanupLogs();
+  } catch {
+    // If state-root cleanup fails, keep the plugin loaded and let per-monitor startup report the real error.
+  }
 
   return {
     tool: {

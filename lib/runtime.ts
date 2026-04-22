@@ -1,9 +1,22 @@
 import { spawn, type ChildProcess } from "child_process";
-import { mkdirSync, readdirSync, rmSync, statSync, createWriteStream, type WriteStream } from "fs";
+import {
+  closeSync,
+  createWriteStream,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  watch,
+  type FSWatcher,
+  type WriteStream,
+} from "fs";
 import path from "path";
 
 import type { EventSessionCreated, EventSessionDeleted, Session } from "@opencode-ai/sdk";
 
+import { appendDebugLog } from "./debug.ts";
 import { commitDelivery, decideLineEvent, decideManualFetch, decideTimeEvent } from "./core.ts";
 import { allocateMonitorId } from "./ids.ts";
 import { appendChunk, flushRemainder } from "./lines.ts";
@@ -54,6 +67,8 @@ export interface MonitorManagerOptions {
   spawnProcess?: typeof spawn;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
+  debugEnabled?: boolean;
+  debugLogPath?: string;
 }
 
 type TimerHandle = ReturnType<typeof setTimeout>;
@@ -64,6 +79,12 @@ type RuntimeMonitor = {
   scheduler: SchedulerState;
   stdoutCollector: LineCollectorState;
   stderrCollector: LineCollectorState;
+  stdoutPath: string;
+  stderrPath: string;
+  stdoutOffset: number;
+  stderrOffset: number;
+  stdoutWatcher: FSWatcher | null;
+  stderrWatcher: FSWatcher | null;
   logStream: WriteStream;
   logFailed: boolean;
   draining: Promise<void> | null;
@@ -82,6 +103,8 @@ export class MonitorManager {
   private readonly spawnProcess: typeof spawn;
   private readonly setTimer: (callback: () => void, delay: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
+  private readonly debugEnabled: boolean;
+  private readonly debugLogPath?: string;
   private readonly bySession = new Map<string, Map<string, RuntimeMonitor>>();
   private readonly sessionIdle = new Map<string, boolean>();
   private primeState: PrimeState = { nextCandidate: 2, queue: [] };
@@ -95,6 +118,8 @@ export class MonitorManager {
     this.spawnProcess = options.spawnProcess ?? spawn;
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.debugEnabled = options.debugEnabled ?? false;
+    this.debugLogPath = options.debugLogPath;
   }
 
   cleanupLogs(olderThanMs = 7 * 24 * 60 * 60 * 1_000): void {
@@ -149,14 +174,19 @@ export class MonitorManager {
     const sessionDir = path.join(this.stateRoot, rootSessionID);
     mkdirSync(sessionDir, { recursive: true });
     const logPath = path.join(sessionDir, `${input.label}.log`);
+    const stdoutPath = path.join(sessionDir, `${input.label}.stdout.log`);
+    const stderrPath = path.join(sessionDir, `${input.label}.stderr.log`);
+    this.ensureFile(stdoutPath);
+    this.ensureFile(stderrPath);
 
-    const child = this.spawnProcess(input.command, {
+    const child = this.spawnProcess(this.buildCapturedCommand(input.command, stdoutPath, stderrPath), {
       cwd: input.cwd,
       env: { ...process.env, ...input.env },
       shell: true,
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: "ignore",
     });
+    child.unref?.();
 
     const record: MonitorRecord = {
       ownerSessionID: rootSessionID,
@@ -183,6 +213,12 @@ export class MonitorManager {
       scheduler: { pendingLines: [], nextSeq: 1 },
       stdoutCollector: { remainder: "" },
       stderrCollector: { remainder: "" },
+      stdoutPath,
+      stderrPath,
+      stdoutOffset: 0,
+      stderrOffset: 0,
+      stdoutWatcher: null,
+      stderrWatcher: null,
       logStream: createWriteStream(logPath, { flags: "a" }),
       logFailed: false,
       draining: null,
@@ -198,9 +234,20 @@ export class MonitorManager {
     });
 
     this.attachProcess(runtime);
+    this.attachFileWatchers(runtime);
     this.setupIntervalTimers(runtime);
     existing.set(input.label, runtime);
     this.bySession.set(rootSessionID, existing);
+    this.logDebug("monitor.start", {
+      ownerSessionID: rootSessionID,
+      label: input.label,
+      monitorId: record.monitorId,
+      pid: record.pid,
+      cwd: input.cwd,
+      logPath,
+      stdoutPath,
+      stderrPath,
+    });
     return this.toSummary(runtime);
   }
 
@@ -221,6 +268,7 @@ export class MonitorManager {
     const batches: DeliveryBatch[] = [];
     for (const monitor of values) {
       await this.serializedDrain(monitor, async () => {
+        this.drainCapturedFiles(monitor);
         const decision = decideManualFetch(monitor.scheduler);
         if (!decision.deliverNow) return;
         const committed = commitDelivery({ state: monitor.scheduler, monitorId: monitor.record.monitorId });
@@ -241,6 +289,13 @@ export class MonitorManager {
     if (!monitor) throw new Error(`Unknown monitor '${label}'.`);
     monitor.record.status = "killed";
     monitor.removalPending = true;
+    this.logDebug("monitor.kill", {
+      ownerSessionID: rootSessionID,
+      label,
+      monitorId: monitor.record.monitorId,
+      pid: monitor.record.pid,
+      signal,
+    });
     this.killProcessTree(monitor, signal);
     return this.toSummary(monitor);
   }
@@ -248,6 +303,7 @@ export class MonitorManager {
   async handleIdle(sessionID: string): Promise<void> {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     this.setSessionIdle(rootSessionID, true);
+    this.logDebug("session.idle", { sessionID, rootSessionID });
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors) return;
     await Promise.all(Array.from(monitors.values()).map((monitor) => this.tryAutoDeliver(monitor, "idle")));
@@ -256,6 +312,7 @@ export class MonitorManager {
   async handleActivity(sessionID: string): Promise<void> {
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     this.setSessionIdle(rootSessionID, false);
+    this.logDebug("session.active", { sessionID, rootSessionID });
   }
 
   async deleteSession(sessionID: string): Promise<void> {
@@ -288,6 +345,7 @@ export class MonitorManager {
 
     runtime.process.on("close", (code, signal) => {
       this.clearScheduledTimers(runtime);
+      this.drainCapturedFiles(runtime);
       if (runtime.removalPending) {
         this.closeLogStream(runtime);
         this.removeRuntime(runtime);
@@ -309,8 +367,21 @@ export class MonitorManager {
       };
       runtime.record.pendingExit = runtime.scheduler.pendingExit;
       runtime.record.pendingLines = runtime.scheduler.pendingLines;
+      this.logDebug("process.close", {
+        ownerSessionID: runtime.record.ownerSessionID,
+        label: runtime.record.label,
+        monitorId: runtime.record.monitorId,
+        pid: runtime.record.pid,
+        code,
+        signal: signal ?? null,
+      });
       this.fireAndForgetDeliver(runtime, "exit");
     });
+  }
+
+  private attachFileWatchers(runtime: RuntimeMonitor): void {
+    runtime.stdoutWatcher = this.watchStreamFile(runtime, "stdout", runtime.stdoutPath);
+    runtime.stderrWatcher = this.watchStreamFile(runtime, "stderr", runtime.stderrPath);
   }
 
   private ingestLine(runtime: RuntimeMonitor, stream: "stdout" | "stderr", content: string): void {
@@ -328,6 +399,14 @@ export class MonitorManager {
     if (!runtime.logFailed) {
       runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}\n`);
     }
+    this.logDebug("line.ingested", {
+      ownerSessionID: runtime.record.ownerSessionID,
+      label: runtime.record.label,
+      monitorId: runtime.record.monitorId,
+      stream,
+      pendingCount: runtime.scheduler.pendingLines.length,
+      contentBytes: Buffer.byteLength(content),
+    });
 
     const decision = decideLineEvent({
       state: runtime.scheduler,
@@ -349,6 +428,7 @@ export class MonitorManager {
 
   private async tryAutoDeliver(runtime: RuntimeMonitor, reason: "line" | "idle" | "interval" | "exit"): Promise<void> {
     await this.serializedDrain(runtime, async () => {
+      this.drainCapturedFiles(runtime);
       const decision =
         reason === "idle"
           ? decideTimeEvent({
@@ -373,17 +453,44 @@ export class MonitorManager {
       if (!decision.deliverNow) return;
       const before = runtime.scheduler;
       const committed = commitDelivery({ state: runtime.scheduler, monitorId: runtime.record.monitorId });
+      this.logDebug("delivery.attempt", {
+        ownerSessionID: runtime.record.ownerSessionID,
+        label: runtime.record.label,
+        monitorId: runtime.record.monitorId,
+        reason,
+        seq: committed.batch.seq,
+        lineCount: committed.batch.lines.length,
+        hasExit: Boolean(committed.batch.exit),
+      });
       try {
         await this.promptAsync(runtime.record.ownerSessionID, formatBatchXml({ record: runtime.record, batch: committed.batch }));
         runtime.scheduler = committed.state;
         runtime.record.nextSeq = committed.state.nextSeq;
         runtime.record.pendingLines = committed.state.pendingLines;
         runtime.record.pendingExit = committed.state.pendingExit;
+        this.logDebug("delivery.success", {
+          ownerSessionID: runtime.record.ownerSessionID,
+          label: runtime.record.label,
+          monitorId: runtime.record.monitorId,
+          reason,
+          seq: committed.batch.seq,
+          lineCount: committed.batch.lines.length,
+          hasExit: Boolean(committed.batch.exit),
+        });
         this.finalizeCompletedRuntime(runtime);
       } catch {
         runtime.scheduler = before;
         runtime.record.pendingLines = before.pendingLines;
         runtime.record.pendingExit = before.pendingExit;
+        this.logDebug("delivery.failure", {
+          ownerSessionID: runtime.record.ownerSessionID,
+          label: runtime.record.label,
+          monitorId: runtime.record.monitorId,
+          reason,
+          seq: committed.batch.seq,
+          lineCount: committed.batch.lines.length,
+          hasExit: Boolean(committed.batch.exit),
+        });
         throw new Error("promptAsync delivery failed");
       }
     });
@@ -401,6 +508,7 @@ export class MonitorManager {
   private killProcessTree(runtime: RuntimeMonitor, signal: NodeJS.Signals): void {
     runtime.destroyed = true;
     this.clearScheduledTimers(runtime);
+    this.closeWatchers(runtime);
     const pid = runtime.process.pid;
     if (!pid) return;
     try {
@@ -501,10 +609,18 @@ export class MonitorManager {
     if (runtime.destroyed && !this.bySession.get(runtime.record.ownerSessionID)?.has(runtime.record.label)) return;
     runtime.destroyed = true;
     this.clearScheduledTimers(runtime);
+    this.closeWatchers(runtime);
     this.closeLogStream(runtime);
     const monitors = this.bySession.get(runtime.record.ownerSessionID);
     monitors?.delete(runtime.record.label);
     if (monitors && monitors.size === 0) this.bySession.delete(runtime.record.ownerSessionID);
+    this.logDebug("monitor.remove", {
+      ownerSessionID: runtime.record.ownerSessionID,
+      label: runtime.record.label,
+      monitorId: runtime.record.monitorId,
+      pid: runtime.record.pid,
+      status: runtime.record.status,
+    });
   }
 
   private toSummary(runtime: RuntimeMonitor): MonitorSummary {
@@ -520,6 +636,120 @@ export class MonitorManager {
       triggers: runtime.record.triggers,
       logPath: runtime.record.logPath,
     };
+  }
+
+  private fireAndForgetDrain(runtime: RuntimeMonitor): void {
+    void this.serializedDrain(runtime, async () => {
+      this.drainCapturedFiles(runtime);
+    }).catch(() => {
+      // Ignore watcher races and preserve delivery state.
+    });
+  }
+
+  private drainCapturedFiles(runtime: RuntimeMonitor): void {
+    this.drainCapturedStream(runtime, "stdout");
+    this.drainCapturedStream(runtime, "stderr");
+  }
+
+  private drainCapturedStream(runtime: RuntimeMonitor, stream: "stdout" | "stderr"): void {
+    const filePath = stream === "stdout" ? runtime.stdoutPath : runtime.stderrPath;
+    const offset = stream === "stdout" ? runtime.stdoutOffset : runtime.stderrOffset;
+    const collector = stream === "stdout" ? runtime.stdoutCollector : runtime.stderrCollector;
+    const chunk = this.readAppendedChunk(filePath, offset);
+    if (!chunk) return;
+
+    const result = appendChunk(collector, chunk.text);
+    if (stream === "stdout") {
+      runtime.stdoutCollector = result.state;
+      runtime.stdoutOffset = chunk.nextOffset;
+    } else {
+      runtime.stderrCollector = result.state;
+      runtime.stderrOffset = chunk.nextOffset;
+    }
+    if (result.lines.length > 0) {
+      this.logDebug("capture.drain", {
+        ownerSessionID: runtime.record.ownerSessionID,
+        label: runtime.record.label,
+        monitorId: runtime.record.monitorId,
+        stream,
+        bytes: chunk.text.length,
+        lines: result.lines.length,
+      });
+    }
+    for (const line of result.lines) this.ingestLine(runtime, stream, line);
+  }
+
+  private readAppendedChunk(filePath: string, offset: number): { text: string; nextOffset: number } | null {
+    let size: number;
+    try {
+      size = statSync(filePath).size;
+    } catch {
+      return null;
+    }
+    const start = size < offset ? 0 : offset;
+    if (size <= start) return null;
+
+    const fd = openSync(filePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(size - start);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
+      if (bytesRead <= 0) return null;
+      return {
+        text: buffer.subarray(0, bytesRead).toString(),
+        nextOffset: start + bytesRead,
+      };
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private watchStreamFile(runtime: RuntimeMonitor, stream: "stdout" | "stderr", filePath: string): FSWatcher | null {
+    try {
+      return watch(filePath, { persistent: false }, (eventType) => {
+        if (runtime.closed || runtime.destroyed || runtime.removalPending) return;
+        if (eventType !== "change") return;
+        this.logDebug("capture.watch", {
+          ownerSessionID: runtime.record.ownerSessionID,
+          label: runtime.record.label,
+          monitorId: runtime.record.monitorId,
+          stream,
+        });
+        this.fireAndForgetDrain(runtime);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private closeWatchers(runtime: RuntimeMonitor): void {
+    for (const watcher of [runtime.stdoutWatcher, runtime.stderrWatcher]) {
+      if (!watcher) continue;
+      try {
+        watcher.close();
+      } catch {
+        // best effort
+      }
+    }
+    runtime.stdoutWatcher = null;
+    runtime.stderrWatcher = null;
+  }
+
+  private ensureFile(filePath: string): void {
+    const fd = openSync(filePath, "a");
+    closeSync(fd);
+  }
+
+  private buildCapturedCommand(command: string, stdoutPath: string, stderrPath: string): string {
+    return `(${command}) >> ${this.quoteShellArg(stdoutPath)} 2>> ${this.quoteShellArg(stderrPath)}`;
+  }
+
+  private quoteShellArg(value: string): string {
+    return `'${value.replaceAll("'", `'\\''`)}'`;
+  }
+
+  private logDebug(event: string, details: Record<string, unknown> = {}): void {
+    if (!this.debugEnabled || !this.debugLogPath) return;
+    appendDebugLog(this.debugLogPath, this.now(), event, details);
   }
 }
 
