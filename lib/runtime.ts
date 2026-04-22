@@ -2,13 +2,18 @@ import { spawn, type ChildProcess } from "child_process";
 import {
   closeSync,
   createWriteStream,
+  existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   watch,
+  writeFileSync,
   type FSWatcher,
   type WriteStream,
 } from "fs";
@@ -25,10 +30,14 @@ import type {
   DeliveryBatch,
   IngestedLine,
   LineCollectorState,
+  MonitorLifetime,
   MonitorRecord,
   OutputFormat,
+  PersistentMonitorSnapshot,
   PrimeState,
   SchedulerState,
+  SessionLeaseRecord,
+  SessionMonitorsManifest,
   TriggerConfig,
 } from "./types.ts";
 import { formatBatchXml, formatDateTime } from "./xml.ts";
@@ -43,7 +52,9 @@ export interface StartMonitorInput {
   env?: Record<string, string>;
   triggers: TriggerConfig[];
   tagTemplate: string;
+  lifetime?: MonitorLifetime;
   requestedId?: string;
+  sendOnlyLatest?: boolean;
 }
 
 export interface MonitorSummary {
@@ -57,6 +68,8 @@ export interface MonitorSummary {
   outputFormat: OutputFormat;
   triggers: TriggerConfig[];
   logPath: string;
+  lifetime: MonitorLifetime;
+  sendOnlyLatest: boolean;
 }
 
 export interface MonitorManagerOptions {
@@ -73,9 +86,11 @@ export interface MonitorManagerOptions {
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
+type ProcessHandle = Pick<ChildProcess, "pid" | "kill"> & Partial<Pick<ChildProcess, "stdout" | "stderr" | "on" | "unref">>;
+
 type RuntimeMonitor = {
   record: MonitorRecord;
-  process: ChildProcess;
+  process: ProcessHandle;
   scheduler: SchedulerState;
   stdoutCollector: LineCollectorState;
   stderrCollector: LineCollectorState;
@@ -93,6 +108,7 @@ type RuntimeMonitor = {
   removalPending: boolean;
   debounceTimer: TimerHandle | null;
   intervalTimers: TimerHandle[];
+  healthTimer: TimerHandle | null;
 };
 
 export class MonitorManager {
@@ -109,6 +125,10 @@ export class MonitorManager {
   private readonly sessionIdle = new Map<string, boolean>();
   private primeState: PrimeState = { nextCandidate: 2, queue: [] };
   private readonly sessionRoots = new Map<string, string>();
+  private readonly loadedSessions = new Set<string>();
+  private readonly loadingSessions = new Map<string, Promise<void>>();
+  private readonly loadErrors = new Map<string, Error>();
+  private readonly leasedSessions = new Set<string>();
 
   constructor(options: MonitorManagerOptions) {
     this.now = options.now ?? Date.now;
@@ -130,9 +150,13 @@ export class MonitorManager {
       if (entry.isDirectory()) {
         for (const nested of readdirSync(entryPath, { withFileTypes: true })) {
           const nestedPath = path.join(entryPath, nested.name);
+          if (nested.name === "monitors.json" || nested.name === "monitors.lease.json") continue;
           if (nested.isFile() && statSync(nestedPath).mtimeMs < cutoff) rmSync(nestedPath);
         }
-        if (readdirSync(entryPath).length === 0) rmSync(entryPath, { recursive: true, force: true });
+        const remaining = readdirSync(entryPath).filter((name) => name !== "monitors.json" && name !== "monitors.lease.json");
+        if (remaining.length === 0 && !existsSync(path.join(entryPath, "monitors.json")) && !existsSync(path.join(entryPath, "monitors.lease.json"))) {
+          rmSync(entryPath, { recursive: true, force: true });
+        }
         continue;
       }
       if (entry.isFile() && statSync(entryPath).mtimeMs < cutoff) rmSync(entryPath);
@@ -140,9 +164,7 @@ export class MonitorManager {
   }
 
   rememberSessionCreated(event: EventSessionCreated): void {
-    const sessionID = event.properties.info.id;
-    const parentID = event.properties.info.parentID ?? undefined;
-    this.sessionRoots.set(sessionID, parentID ? this.sessionRoots.get(parentID) ?? parentID : sessionID);
+    this.rememberSessionInfo(event.properties.info.id, event.properties.info.parentID ?? undefined);
   }
 
   rememberSessionDeleted(event: EventSessionDeleted): { sessionID: string; isRoot: boolean } {
@@ -156,7 +178,41 @@ export class MonitorManager {
     this.sessionIdle.set(sessionID, idle);
   }
 
+  rememberSessionInfo(sessionID: string, parentID?: string): void {
+    this.sessionRoots.set(sessionID, parentID ? this.sessionRoots.get(parentID) ?? parentID : sessionID);
+  }
+
+  async ensureSessionLoaded(sessionID: string): Promise<void> {
+    const rootSessionID = await this.resolveRootSessionID(sessionID);
+    const priorError = this.loadErrors.get(rootSessionID);
+    if (priorError) throw priorError;
+    if (this.loadedSessions.has(rootSessionID)) return;
+    const pending = this.loadingSessions.get(rootSessionID);
+    if (pending) {
+      await pending;
+      return;
+    }
+
+    const load = this.loadPersistentSession(rootSessionID)
+      .then(() => {
+        this.loadedSessions.add(rootSessionID);
+        this.loadErrors.delete(rootSessionID);
+      })
+      .catch((error) => {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        this.loadErrors.set(rootSessionID, normalized);
+        throw normalized;
+      })
+      .finally(() => {
+        this.loadingSessions.delete(rootSessionID);
+      });
+
+    this.loadingSessions.set(rootSessionID, load);
+    await load;
+  }
+
   async startMonitor(input: StartMonitorInput): Promise<MonitorSummary> {
+    await this.ensureSessionLoaded(input.ownerSessionID);
     const rootSessionID = await this.resolveRootSessionID(input.ownerSessionID);
     const existing = this.bySession.get(rootSessionID) ?? new Map<string, RuntimeMonitor>();
     if (existing.has(input.label)) {
@@ -171,87 +227,53 @@ export class MonitorManager {
     });
     this.primeState = allocated.primeState;
 
-    const sessionDir = path.join(this.stateRoot, rootSessionID);
-    mkdirSync(sessionDir, { recursive: true });
-    const logPath = path.join(sessionDir, `${input.label}.log`);
-    const stdoutPath = path.join(sessionDir, `${input.label}.stdout.log`);
-    const stderrPath = path.join(sessionDir, `${input.label}.stderr.log`);
-    this.ensureFile(stdoutPath);
-    this.ensureFile(stderrPath);
-
-    const child = this.spawnProcess(this.buildCapturedCommand(input.command, stdoutPath, stderrPath), {
-      cwd: input.cwd,
-      env: { ...process.env, ...input.env },
-      shell: true,
-      detached: true,
-      stdio: "ignore",
+    const lifetime = input.lifetime ?? "ephemeral";
+    if (lifetime === "persistent") this.acquireSessionLease(rootSessionID);
+    const runtime = this.createRuntimeMonitor({
+      rootSessionID,
+      record: {
+        ownerSessionID: rootSessionID,
+        label: input.label,
+        monitorId: allocated.id,
+        command: input.command,
+        pid: -1,
+        capture: input.capture,
+        outputFormat: input.outputFormat ?? "compact",
+        triggers: input.triggers,
+        cwd: input.cwd,
+        env: input.env ?? {},
+        logPath: this.defaultLogPath(rootSessionID, input.label),
+        tagTemplate: input.tagTemplate,
+        lifetime,
+        sendOnlyLatest: input.sendOnlyLatest ?? false,
+        requestedMonitorId: input.requestedId,
+        nextSeq: 1,
+        pendingLines: [],
+        status: "running",
+      },
+      restoreState: undefined,
+      startMode: "spawn",
     });
-    child.unref?.();
-
-    const record: MonitorRecord = {
-      ownerSessionID: rootSessionID,
-      label: input.label,
-      monitorId: allocated.id,
-      command: input.command,
-      pid: child.pid ?? -1,
-      capture: input.capture,
-      outputFormat: input.outputFormat ?? "compact",
-      triggers: input.triggers,
-      cwd: input.cwd,
-      env: input.env ?? {},
-      logPath,
-      tagTemplate: input.tagTemplate,
-      requestedMonitorId: input.requestedId,
-      nextSeq: 1,
-      pendingLines: [],
-      status: "running",
-    };
-
-    const runtime: RuntimeMonitor = {
-      record,
-      process: child,
-      scheduler: { pendingLines: [], nextSeq: 1 },
-      stdoutCollector: { remainder: "" },
-      stderrCollector: { remainder: "" },
-      stdoutPath,
-      stderrPath,
-      stdoutOffset: 0,
-      stderrOffset: 0,
-      stdoutWatcher: null,
-      stderrWatcher: null,
-      logStream: createWriteStream(logPath, { flags: "a" }),
-      logFailed: false,
-      draining: null,
-      destroyed: false,
-      closed: false,
-      removalPending: false,
-      debounceTimer: null,
-      intervalTimers: [],
-    };
-
-    runtime.logStream.on("error", () => {
-      runtime.logFailed = true;
-    });
-
-    this.attachProcess(runtime);
-    this.attachFileWatchers(runtime);
-    this.setupIntervalTimers(runtime);
     existing.set(input.label, runtime);
     this.bySession.set(rootSessionID, existing);
+    this.persistSessionState(rootSessionID);
     this.logDebug("monitor.start", {
       ownerSessionID: rootSessionID,
       label: input.label,
-      monitorId: record.monitorId,
-      pid: record.pid,
+      monitorId: runtime.record.monitorId,
+      pid: runtime.record.pid,
       cwd: input.cwd,
-      logPath,
-      stdoutPath,
-      stderrPath,
+      logPath: runtime.record.logPath,
+      stdoutPath: runtime.stdoutPath,
+      stderrPath: runtime.stderrPath,
+      lifetime: runtime.record.lifetime,
+      sendOnlyLatest: runtime.record.sendOnlyLatest,
     });
     return this.toSummary(runtime);
   }
 
   async listMonitors(sessionID: string, label?: string): Promise<MonitorSummary[]> {
+    await this.ensureSessionLoaded(sessionID);
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors) return [];
@@ -260,6 +282,7 @@ export class MonitorManager {
   }
 
   async fetchPending(sessionID: string, label?: string): Promise<DeliveryBatch[]> {
+    await this.ensureSessionLoaded(sessionID);
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors) return [];
@@ -271,11 +294,16 @@ export class MonitorManager {
         this.drainCapturedFiles(monitor);
         const decision = decideManualFetch(monitor.scheduler);
         if (!decision.deliverNow) return;
-        const committed = commitDelivery({ state: monitor.scheduler, monitorId: monitor.record.monitorId });
+        const committed = commitDelivery({
+          state: monitor.scheduler,
+          monitorId: monitor.record.monitorId,
+          sendOnlyLatest: monitor.record.sendOnlyLatest,
+        });
         monitor.scheduler = committed.state;
         monitor.record.nextSeq = committed.state.nextSeq;
         monitor.record.pendingLines = committed.state.pendingLines;
         monitor.record.pendingExit = committed.state.pendingExit;
+        this.persistSessionState(monitor.record.ownerSessionID);
         this.finalizeCompletedRuntime(monitor);
         batches.push(committed.batch);
       });
@@ -284,6 +312,7 @@ export class MonitorManager {
   }
 
   async killMonitor(sessionID: string, label: string, signal: NodeJS.Signals = "SIGTERM"): Promise<MonitorSummary> {
+    await this.ensureSessionLoaded(sessionID);
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     const monitor = this.bySession.get(rootSessionID)?.get(label);
     if (!monitor) throw new Error(`Unknown monitor '${label}'.`);
@@ -296,11 +325,13 @@ export class MonitorManager {
       pid: monitor.record.pid,
       signal,
     });
+    this.persistSessionState(rootSessionID);
     this.killProcessTree(monitor, signal);
     return this.toSummary(monitor);
   }
 
   async handleIdle(sessionID: string): Promise<void> {
+    await this.ensureSessionLoaded(sessionID);
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     this.setSessionIdle(rootSessionID, true);
     this.logDebug("session.idle", { sessionID, rootSessionID });
@@ -310,12 +341,14 @@ export class MonitorManager {
   }
 
   async handleActivity(sessionID: string): Promise<void> {
+    await this.ensureSessionLoaded(sessionID);
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     this.setSessionIdle(rootSessionID, false);
     this.logDebug("session.active", { sessionID, rootSessionID });
   }
 
   async deleteSession(sessionID: string): Promise<void> {
+    await this.ensureSessionLoaded(sessionID).catch(() => {});
     const rootSessionID = await this.resolveRootSessionID(sessionID);
     const monitors = this.bySession.get(rootSessionID);
     if (!monitors) return;
@@ -325,6 +358,121 @@ export class MonitorManager {
       this.killProcessTree(monitor, "SIGTERM");
     }
     this.sessionRoots.delete(rootSessionID);
+    this.loadedSessions.delete(rootSessionID);
+    this.loadErrors.delete(rootSessionID);
+    this.deleteManifest(rootSessionID);
+    this.releaseSessionLease(rootSessionID);
+  }
+
+  async shutdown(): Promise<void> {
+    for (const monitors of this.bySession.values()) {
+      for (const monitor of monitors.values()) {
+        monitor.destroyed = true;
+        this.clearScheduledTimers(monitor);
+        this.closeWatchers(monitor);
+        this.closeLogStream(monitor);
+        try {
+          const pid = monitor.process.pid;
+          if (pid) process.kill(-pid, "SIGTERM");
+        } catch {
+          try {
+            monitor.process.kill("SIGTERM");
+          } catch {
+            // best effort
+          }
+        }
+      }
+    }
+  }
+
+  private createRuntimeMonitor(input: {
+    rootSessionID: string;
+    record: MonitorRecord;
+    restoreState?: PersistentMonitorSnapshot;
+    startMode: "spawn" | "attach";
+  }): RuntimeMonitor {
+    const sessionDir = this.sessionDir(input.rootSessionID);
+    mkdirSync(sessionDir, { recursive: true });
+    const stdoutPath = input.restoreState?.stdoutPath ?? path.join(sessionDir, `${input.record.label}.stdout.log`);
+    const stderrPath = input.restoreState?.stderrPath ?? path.join(sessionDir, `${input.record.label}.stderr.log`);
+    this.ensureFile(stdoutPath);
+    this.ensureFile(stderrPath);
+
+    const processHandle =
+      input.startMode === "attach"
+        ? this.createAttachedProcessHandle(input.restoreState?.pid ?? input.record.pid)
+        : this.spawnCapturedProcess(input.record.command, stdoutPath, stderrPath, input.record.cwd, input.record.env);
+
+    input.record.pid = processHandle.pid ?? input.restoreState?.pid ?? input.record.pid;
+
+    const runtime: RuntimeMonitor = {
+      record: input.record,
+      process: processHandle,
+      scheduler: {
+        pendingLines: input.restoreState?.pendingLines ?? [],
+        pendingExit: input.restoreState?.pendingExit,
+        nextSeq: input.restoreState?.nextSeq ?? input.record.nextSeq,
+      },
+      stdoutCollector: { remainder: input.restoreState?.stdoutRemainder ?? "" },
+      stderrCollector: { remainder: input.restoreState?.stderrRemainder ?? "" },
+      stdoutPath,
+      stderrPath,
+      stdoutOffset: input.restoreState?.stdoutOffset ?? 0,
+      stderrOffset: input.restoreState?.stderrOffset ?? 0,
+      stdoutWatcher: null,
+      stderrWatcher: null,
+      logStream: createWriteStream(input.record.logPath, { flags: "a" }),
+      logFailed: false,
+      draining: null,
+      destroyed: false,
+      closed: false,
+      removalPending: false,
+      debounceTimer: null,
+      intervalTimers: [],
+      healthTimer: null,
+    };
+
+    runtime.record.nextSeq = runtime.scheduler.nextSeq;
+    runtime.record.pendingLines = runtime.scheduler.pendingLines;
+    runtime.record.pendingExit = runtime.scheduler.pendingExit;
+
+    runtime.logStream.on("error", () => {
+      runtime.logFailed = true;
+    });
+
+    this.attachProcess(runtime);
+    this.attachFileWatchers(runtime);
+    this.setupIntervalTimers(runtime);
+    this.setupHealthTimer(runtime);
+    return runtime;
+  }
+
+  private spawnCapturedProcess(
+    command: string,
+    stdoutPath: string,
+    stderrPath: string,
+    cwd: string,
+    env: Record<string, string>,
+  ): ProcessHandle {
+    const child = this.spawnProcess(this.buildCapturedCommand(command, stdoutPath, stderrPath), {
+      cwd,
+      env: { ...process.env, ...env },
+      shell: true,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref?.();
+    return child;
+  }
+
+  private createAttachedProcessHandle(pid: number): ProcessHandle {
+    return {
+      pid,
+      kill: (signal?: NodeJS.Signals) => {
+        if (!pid) return;
+        process.kill(pid, signal);
+      },
+    };
   }
 
   private attachProcess(runtime: RuntimeMonitor): void {
@@ -332,50 +480,19 @@ export class MonitorManager {
       for (const line of lines) this.ingestLine(runtime, stream, line);
     };
 
-    runtime.process.stdout?.on("data", (chunk: Buffer | string) => {
+    runtime.process.stdout?.on?.("data", (chunk: Buffer | string) => {
       const result = appendChunk(runtime.stdoutCollector, chunk.toString());
       runtime.stdoutCollector = result.state;
       onLines("stdout", result.lines);
     });
-    runtime.process.stderr?.on("data", (chunk: Buffer | string) => {
+    runtime.process.stderr?.on?.("data", (chunk: Buffer | string) => {
       const result = appendChunk(runtime.stderrCollector, chunk.toString());
       runtime.stderrCollector = result.state;
       onLines("stderr", result.lines);
     });
 
-    runtime.process.on("close", (code, signal) => {
-      this.clearScheduledTimers(runtime);
-      this.drainCapturedFiles(runtime);
-      if (runtime.removalPending) {
-        this.closeLogStream(runtime);
-        this.removeRuntime(runtime);
-        return;
-      }
-
-      const stdoutFlushed = flushRemainder(runtime.stdoutCollector);
-      runtime.stdoutCollector = stdoutFlushed.state;
-      onLines("stdout", stdoutFlushed.lines);
-      const stderrFlushed = flushRemainder(runtime.stderrCollector);
-      runtime.stderrCollector = stderrFlushed.state;
-      onLines("stderr", stderrFlushed.lines);
-
-      runtime.record.status = runtime.record.status === "killed" ? "killed" : "exited";
-      runtime.scheduler.pendingExit = {
-        exitCode: code,
-        signal: signal ?? null,
-        occurredAt: this.now(),
-      };
-      runtime.record.pendingExit = runtime.scheduler.pendingExit;
-      runtime.record.pendingLines = runtime.scheduler.pendingLines;
-      this.logDebug("process.close", {
-        ownerSessionID: runtime.record.ownerSessionID,
-        label: runtime.record.label,
-        monitorId: runtime.record.monitorId,
-        pid: runtime.record.pid,
-        code,
-        signal: signal ?? null,
-      });
-      this.fireAndForgetDeliver(runtime, "exit");
+    runtime.process.on?.("close", (code, signal) => {
+      this.handleObservedProcessExit(runtime, code, signal ?? null);
     });
   }
 
@@ -399,6 +516,7 @@ export class MonitorManager {
     if (!runtime.logFailed) {
       runtime.logStream.write(`[${formatDateTime(line.ingestedAt)}] [${stream}] ${content}\n`);
     }
+    this.persistSessionState(runtime.record.ownerSessionID);
     this.logDebug("line.ingested", {
       ownerSessionID: runtime.record.ownerSessionID,
       label: runtime.record.label,
@@ -452,7 +570,11 @@ export class MonitorManager {
 
       if (!decision.deliverNow) return;
       const before = runtime.scheduler;
-      const committed = commitDelivery({ state: runtime.scheduler, monitorId: runtime.record.monitorId });
+      const committed = commitDelivery({
+        state: runtime.scheduler,
+        monitorId: runtime.record.monitorId,
+        sendOnlyLatest: runtime.record.sendOnlyLatest,
+      });
       this.logDebug("delivery.attempt", {
         ownerSessionID: runtime.record.ownerSessionID,
         label: runtime.record.label,
@@ -468,6 +590,7 @@ export class MonitorManager {
         runtime.record.nextSeq = committed.state.nextSeq;
         runtime.record.pendingLines = committed.state.pendingLines;
         runtime.record.pendingExit = committed.state.pendingExit;
+        this.persistSessionState(runtime.record.ownerSessionID);
         this.logDebug("delivery.success", {
           ownerSessionID: runtime.record.ownerSessionID,
           label: runtime.record.label,
@@ -482,6 +605,7 @@ export class MonitorManager {
         runtime.scheduler = before;
         runtime.record.pendingLines = before.pendingLines;
         runtime.record.pendingExit = before.pendingExit;
+        this.persistSessionState(runtime.record.ownerSessionID);
         this.logDebug("delivery.failure", {
           ownerSessionID: runtime.record.ownerSessionID,
           label: runtime.record.label,
@@ -505,9 +629,50 @@ export class MonitorManager {
     await current;
   }
 
-  private killProcessTree(runtime: RuntimeMonitor, signal: NodeJS.Signals): void {
-    runtime.destroyed = true;
+  private handleObservedProcessExit(runtime: RuntimeMonitor, code: number | null, signal: string | null): void {
+    if (runtime.record.status !== "running" && !runtime.removalPending) return;
     this.clearScheduledTimers(runtime);
+    this.drainCapturedFiles(runtime);
+    if (runtime.removalPending) {
+      this.closeLogStream(runtime);
+      this.removeRuntime(runtime);
+      return;
+    }
+
+    const stdoutFlushed = flushRemainder(runtime.stdoutCollector);
+    runtime.stdoutCollector = stdoutFlushed.state;
+    for (const line of stdoutFlushed.lines) this.ingestLine(runtime, "stdout", line);
+    const stderrFlushed = flushRemainder(runtime.stderrCollector);
+    runtime.stderrCollector = stderrFlushed.state;
+    for (const line of stderrFlushed.lines) this.ingestLine(runtime, "stderr", line);
+
+    runtime.record.status = runtime.record.status === "killed" ? "killed" : "exited";
+    runtime.scheduler.pendingExit = {
+      exitCode: code,
+      signal,
+      occurredAt: this.now(),
+    };
+    runtime.record.pendingExit = runtime.scheduler.pendingExit;
+    runtime.record.pendingLines = runtime.scheduler.pendingLines;
+    this.persistSessionState(runtime.record.ownerSessionID);
+    this.logDebug("process.close", {
+      ownerSessionID: runtime.record.ownerSessionID,
+      label: runtime.record.label,
+      monitorId: runtime.record.monitorId,
+      pid: runtime.record.pid,
+      code,
+      signal,
+    });
+    this.fireAndForgetDeliver(runtime, "exit");
+  }
+
+  private killProcessTree(runtime: RuntimeMonitor, signal: NodeJS.Signals): void {
+    if (runtime.debounceTimer) {
+      this.clearTimer(runtime.debounceTimer);
+      runtime.debounceTimer = null;
+    }
+    for (const timer of runtime.intervalTimers) this.clearTimer(timer);
+    runtime.intervalTimers = [];
     this.closeWatchers(runtime);
     const pid = runtime.process.pid;
     if (!pid) return;
@@ -519,6 +684,16 @@ export class MonitorManager {
       } catch {
         // best effort
       }
+    }
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    if (!pid || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -561,6 +736,22 @@ export class MonitorManager {
     }
   }
 
+  private setupHealthTimer(runtime: RuntimeMonitor): void {
+    const schedule = () => {
+      if (runtime.destroyed || runtime.closed) return;
+      runtime.healthTimer = setTimeout(() => {
+        runtime.healthTimer = null;
+        if (runtime.destroyed || runtime.closed || runtime.record.status !== "running") return;
+        if (!this.isProcessAlive(runtime.record.pid)) {
+          this.handleObservedProcessExit(runtime, null, null);
+          return;
+        }
+        schedule();
+      }, 1_000);
+    };
+    schedule();
+  }
+
   private async resolveRootSessionID(sessionID: string): Promise<string> {
     const seen = new Set<string>();
     let current = sessionID;
@@ -581,6 +772,10 @@ export class MonitorManager {
     if (runtime.debounceTimer) {
       this.clearTimer(runtime.debounceTimer);
       runtime.debounceTimer = null;
+    }
+    if (runtime.healthTimer) {
+      clearTimeout(runtime.healthTimer);
+      runtime.healthTimer = null;
     }
     for (const timer of runtime.intervalTimers) this.clearTimer(timer);
     runtime.intervalTimers = [];
@@ -614,6 +809,7 @@ export class MonitorManager {
     const monitors = this.bySession.get(runtime.record.ownerSessionID);
     monitors?.delete(runtime.record.label);
     if (monitors && monitors.size === 0) this.bySession.delete(runtime.record.ownerSessionID);
+    this.persistSessionState(runtime.record.ownerSessionID);
     this.logDebug("monitor.remove", {
       ownerSessionID: runtime.record.ownerSessionID,
       label: runtime.record.label,
@@ -635,7 +831,180 @@ export class MonitorManager {
       outputFormat: runtime.record.outputFormat,
       triggers: runtime.record.triggers,
       logPath: runtime.record.logPath,
+      lifetime: runtime.record.lifetime,
+      sendOnlyLatest: runtime.record.sendOnlyLatest,
     };
+  }
+
+  private async loadPersistentSession(rootSessionID: string): Promise<void> {
+    const manifest = this.readManifest(rootSessionID);
+    if (!manifest || manifest.monitors.length === 0) return;
+    this.acquireSessionLease(rootSessionID);
+
+    const existing = this.bySession.get(rootSessionID) ?? new Map<string, RuntimeMonitor>();
+    for (const snapshot of manifest.monitors) {
+      if (snapshot.status !== "running") continue;
+      if (existing.has(snapshot.label)) continue;
+      const record: MonitorRecord = {
+        ownerSessionID: rootSessionID,
+        label: snapshot.label,
+        monitorId: snapshot.monitorId,
+        command: snapshot.command,
+        pid: snapshot.pid,
+        capture: snapshot.capture,
+        outputFormat: snapshot.outputFormat,
+        triggers: snapshot.triggers,
+        cwd: snapshot.cwd,
+        env: snapshot.env,
+        logPath: snapshot.logPath,
+        tagTemplate: snapshot.tagTemplate,
+        lifetime: snapshot.lifetime,
+        sendOnlyLatest: snapshot.sendOnlyLatest,
+        requestedMonitorId: snapshot.requestedMonitorId,
+        nextSeq: snapshot.nextSeq,
+        pendingLines: snapshot.pendingLines,
+        pendingExit: snapshot.pendingExit,
+        status: "running",
+      };
+      const runtime = this.createRuntimeMonitor({
+        rootSessionID,
+        record,
+        restoreState: snapshot,
+        startMode: this.isProcessAlive(snapshot.pid) ? "attach" : "spawn",
+      });
+      existing.set(record.label, runtime);
+    }
+    if (existing.size > 0) this.bySession.set(rootSessionID, existing);
+    this.persistSessionState(rootSessionID);
+  }
+
+  private persistSessionState(rootSessionID: string): void {
+    const monitors = this.bySession.get(rootSessionID);
+    const persistent = monitors
+      ? Array.from(monitors.values())
+          .filter(
+            (runtime) =>
+              runtime.record.lifetime === "persistent" &&
+              runtime.record.status === "running" &&
+              !runtime.removalPending,
+          )
+          .map((runtime) => this.snapshotRuntime(runtime))
+      : [];
+
+    if (persistent.length === 0) {
+      this.deleteManifest(rootSessionID);
+      this.releaseSessionLease(rootSessionID);
+      return;
+    }
+
+    this.acquireSessionLease(rootSessionID);
+    const manifest: SessionMonitorsManifest = {
+      version: 1,
+      rootSessionID,
+      monitors: persistent,
+    };
+    this.writeJsonAtomic(this.manifestPath(rootSessionID), manifest);
+  }
+
+  private snapshotRuntime(runtime: RuntimeMonitor): PersistentMonitorSnapshot {
+    return {
+      ownerSessionID: runtime.record.ownerSessionID,
+      label: runtime.record.label,
+      monitorId: runtime.record.monitorId,
+      command: runtime.record.command,
+      pid: runtime.record.pid,
+      capture: runtime.record.capture,
+      outputFormat: runtime.record.outputFormat,
+      triggers: runtime.record.triggers,
+      cwd: runtime.record.cwd,
+      env: runtime.record.env,
+      logPath: runtime.record.logPath,
+      stdoutPath: runtime.stdoutPath,
+      stderrPath: runtime.stderrPath,
+      stdoutOffset: runtime.stdoutOffset,
+      stderrOffset: runtime.stderrOffset,
+      stdoutRemainder: runtime.stdoutCollector.remainder,
+      stderrRemainder: runtime.stderrCollector.remainder,
+      tagTemplate: runtime.record.tagTemplate,
+      lifetime: runtime.record.lifetime,
+      sendOnlyLatest: runtime.record.sendOnlyLatest,
+      requestedMonitorId: runtime.record.requestedMonitorId,
+      nextSeq: runtime.scheduler.nextSeq,
+      pendingLines: runtime.scheduler.pendingLines,
+      pendingExit: runtime.scheduler.pendingExit,
+      status: runtime.record.status,
+    };
+  }
+
+  private acquireSessionLease(rootSessionID: string): void {
+    if (this.leasedSessions.has(rootSessionID)) return;
+    const existing = this.readLease(rootSessionID);
+    if (existing && existing.ownerPid !== process.pid && this.isProcessAlive(existing.ownerPid)) {
+      throw new Error(`Persistent monitors for session '${rootSessionID}' are already owned by pid ${existing.ownerPid}.`);
+    }
+    const lease: SessionLeaseRecord = {
+      version: 1,
+      rootSessionID,
+      ownerPid: process.pid,
+      acquiredAt: this.now(),
+    };
+    this.writeJsonAtomic(this.leasePath(rootSessionID), lease);
+    this.leasedSessions.add(rootSessionID);
+  }
+
+  private releaseSessionLease(rootSessionID: string): void {
+    const lease = this.readLease(rootSessionID);
+    if (lease?.ownerPid === process.pid) {
+      try {
+        unlinkSync(this.leasePath(rootSessionID));
+      } catch {
+        // best effort
+      }
+    }
+    this.leasedSessions.delete(rootSessionID);
+  }
+
+  private readManifest(rootSessionID: string): SessionMonitorsManifest | null {
+    const filePath = this.manifestPath(rootSessionID);
+    if (!existsSync(filePath)) return null;
+    return JSON.parse(readFileSync(filePath, "utf8")) as SessionMonitorsManifest;
+  }
+
+  private readLease(rootSessionID: string): SessionLeaseRecord | null {
+    const filePath = this.leasePath(rootSessionID);
+    if (!existsSync(filePath)) return null;
+    return JSON.parse(readFileSync(filePath, "utf8")) as SessionLeaseRecord;
+  }
+
+  private deleteManifest(rootSessionID: string): void {
+    try {
+      unlinkSync(this.manifestPath(rootSessionID));
+    } catch {
+      // best effort
+    }
+  }
+
+  private writeJsonAtomic(filePath: string, value: unknown): void {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const tempPath = `${filePath}.tmp-${process.pid}`;
+    writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+    renameSync(tempPath, filePath);
+  }
+
+  private sessionDir(rootSessionID: string): string {
+    return path.join(this.stateRoot, rootSessionID);
+  }
+
+  private manifestPath(rootSessionID: string): string {
+    return path.join(this.sessionDir(rootSessionID), "monitors.json");
+  }
+
+  private leasePath(rootSessionID: string): string {
+    return path.join(this.sessionDir(rootSessionID), "monitors.lease.json");
+  }
+
+  private defaultLogPath(rootSessionID: string, label: string): string {
+    return path.join(this.sessionDir(rootSessionID), `${label}.log`);
   }
 
   private fireAndForgetDrain(runtime: RuntimeMonitor): void {

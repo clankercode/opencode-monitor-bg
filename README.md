@@ -8,6 +8,8 @@ OpenCode plugin that starts background processes, collects stdout/stderr lines, 
 - `monitor_list`
 - `monitor_fetch`
 - `monitor_kill`
+- persistent monitor resume across OpenCode restarts
+- latest-only grouped delivery for heartbeat-style monitors
 - root-session ownership isolation
 - readable date-time strings in model-facing XML
 - pure, property-tested scheduling/ID/line-framing core
@@ -40,8 +42,14 @@ bun run build
 ## Notes
 
 - State files default to `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/`.
+- Persistent monitor manifests live at `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/<rootSessionID>/monitors.json`.
+- Per-session ownership leases live at `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/<rootSessionID>/monitors.lease.json`.
 - Override log root with `MONITOR_LOG_DIR`.
 - Background command output is captured via per-monitor state files instead of parent-owned stdout/stderr pipes, so quiet loops keep running even if the plugin host restarts.
+- `monitor_start` accepts `lifetime: "ephemeral" | "persistent"` and defaults to `ephemeral`.
+- Persistent monitors are auto-restored once per root session after plugin startup or first session touch. If another live OpenCode process already owns that session lease, restore is rejected.
+- Persistent monitors are best-effort killed when the OpenCode host exits cleanly, but their saved desired-active state remains so the next session resume can restart them.
+- `monitor_start` accepts `send_only_latest: true|false` and defaults to `false`. When enabled, grouped deliveries and `monitor_fetch` keep only the newest pending line while still preserving any exit event.
 - Debug logging writes JSONL to `${MONITOR_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor}/plugin-debug.jsonl`.
 - `PLUGIN_OC_MONITOR_DEBUG_LOG=1` enables debug logging, and it is currently default-on when unset.
 - Set `PLUGIN_OC_MONITOR_DEBUG_LOG=0` to disable the debug JSONL once you no longer need lifecycle traces.

@@ -1,4 +1,4 @@
-import type { Event, EventSessionCreated, EventSessionDeleted } from "@opencode-ai/sdk";
+import type { Event, EventSessionCreated, EventSessionDeleted, EventSessionUpdated } from "@opencode-ai/sdk";
 import { tool, type Plugin } from "@opencode-ai/plugin";
 
 import { debugLoggingEnabled, defaultDebugLogPath, defaultStateRoot } from "./lib/debug.ts";
@@ -20,6 +20,35 @@ export const MonitorPlugin: Plugin = async (ctx) => {
     debugLogPath: defaultDebugLogPath(stateRoot),
   });
 
+  let shutdownStarted = false;
+  const shutdown = () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    void manager.shutdown();
+  };
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.once(signal, shutdown);
+  }
+  process.once("exit", shutdown);
+
+  const startRestoreScan = () => {
+    let attemptsRemaining = 60;
+    const tick = async () => {
+      if (attemptsRemaining <= 0) return;
+      attemptsRemaining -= 1;
+      try {
+        const result = await ctx.client.session.status?.();
+        const statuses = (result as { data?: Record<string, unknown> } | undefined)?.data ?? {};
+        await Promise.all(Object.keys(statuses).map((sessionID) => manager.ensureSessionLoaded(sessionID).catch(() => {})));
+      } catch {
+        // best effort
+      }
+      if (attemptsRemaining > 0) setTimeout(() => void tick(), 1_000);
+    };
+    setTimeout(() => void tick(), 1_000);
+  };
+  startRestoreScan();
+
   try {
     manager.cleanupLogs();
   } catch {
@@ -39,7 +68,9 @@ export const MonitorPlugin: Plugin = async (ctx) => {
           cwd: tool.schema.string().optional(),
           env: tool.schema.record(tool.schema.string(), tool.schema.string()).optional(),
           tagTemplate: tool.schema.string().default("monitor_{id}"),
+          lifetime: tool.schema.enum(["ephemeral", "persistent"]).default("ephemeral"),
           requestedId: tool.schema.string().optional(),
+          send_only_latest: tool.schema.boolean().default(false),
           triggers: tool.schema
             .array(
               tool.schema.union([
@@ -57,6 +88,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
             .default([{ type: "idle" }]),
         },
         async execute(args, context) {
+          await manager.ensureSessionLoaded(context.sessionID);
           const summary = await manager.startMonitor({
             ownerSessionID: context.sessionID,
             label: args.label,
@@ -67,7 +99,9 @@ export const MonitorPlugin: Plugin = async (ctx) => {
             env: args.env as Record<string, string> | undefined,
             triggers: args.triggers,
             tagTemplate: args.tagTemplate,
+            lifetime: args.lifetime,
             requestedId: args.requestedId,
+            sendOnlyLatest: args.send_only_latest,
           });
           return {
             output: JSON.stringify(summary, null, 2),
@@ -81,6 +115,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
           label: tool.schema.string().optional(),
         },
         async execute(args, context) {
+          await manager.ensureSessionLoaded(context.sessionID);
           const monitors = await manager.listMonitors(context.sessionID, args.label);
           return JSON.stringify(monitors, null, 2);
         },
@@ -91,6 +126,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
           label: tool.schema.string().optional(),
         },
         async execute(args, context) {
+          await manager.ensureSessionLoaded(context.sessionID);
           const batches = await manager.fetchPending(context.sessionID, args.label);
           return JSON.stringify(batches, null, 2);
         },
@@ -102,6 +138,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
           signal: tool.schema.enum(["SIGTERM", "SIGKILL"]).default("SIGTERM"),
         },
         async execute(args, context) {
+          await manager.ensureSessionLoaded(context.sessionID);
           const summary = await manager.killMonitor(context.sessionID, args.label, args.signal);
           return JSON.stringify(summary, null, 2);
         },
@@ -110,9 +147,17 @@ export const MonitorPlugin: Plugin = async (ctx) => {
     event: async ({ event }: { event: Event }) => {
       if (event.type === "session.created") {
         manager.rememberSessionCreated(event as EventSessionCreated);
+        await manager.ensureSessionLoaded(event.properties.info.id).catch(() => {});
+        return;
+      }
+      if (event.type === "session.updated") {
+        const updated = event as EventSessionUpdated;
+        manager.rememberSessionInfo(updated.properties.info.id, updated.properties.info.parentID ?? undefined);
+        await manager.ensureSessionLoaded(updated.properties.info.id).catch(() => {});
         return;
       }
       if (event.type === "session.idle") {
+        await manager.ensureSessionLoaded(event.properties.sessionID).catch(() => {});
         await manager.handleIdle(event.properties.sessionID);
         return;
       }
@@ -122,6 +167,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
         return;
       }
       if (event.type === "session.status") {
+        await manager.ensureSessionLoaded(event.properties.sessionID).catch(() => {});
         const idle = event.properties.status.type === "idle";
         if (idle) await manager.handleIdle(event.properties.sessionID);
         else await manager.handleActivity(event.properties.sessionID);

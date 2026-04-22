@@ -165,6 +165,30 @@ describe("core", () => {
     expect(committed.state.pendingExit).toBeUndefined();
   });
 
+  test("commitDelivery can collapse multi-line batches to only the latest line", () => {
+    const state = makeSchedulerState({ pendingLines: makeLines(3), nextSeq: 8 });
+    const committed = commitDelivery({ state, monitorId: "m19", sendOnlyLatest: true });
+
+    expect(committed.batch).toEqual({
+      monitorId: "m19",
+      seq: 8,
+      lines: [state.pendingLines[2]],
+      exit: undefined,
+    });
+    expect(committed.state.pendingLines).toEqual([]);
+    expect(committed.state.nextSeq).toBe(9);
+  });
+
+  test("commitDelivery preserves exit when collapsing to only the latest line", () => {
+    const exit = makeExit();
+    const state = makeSchedulerState({ pendingLines: makeLines(2), pendingExit: exit, nextSeq: 5 });
+    const committed = commitDelivery({ state, monitorId: "m23", sendOnlyLatest: true });
+
+    expect(committed.batch.lines).toEqual([state.pendingLines[1]]);
+    expect(committed.batch.exit).toEqual(exit);
+    expect(committed.state.pendingExit).toBeUndefined();
+  });
+
   test("committed deliveries preserve line ordering", () => {
     fc.assert(
       fc.property(fc.array(fc.string(), { minLength: 1, maxLength: 20 }), (contents) => {

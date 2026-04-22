@@ -109,4 +109,49 @@ describe("plugin", () => {
       expect(promptAsync).not.toHaveBeenCalled();
     });
   });
+
+  test("monitor_start accepts lifetime and send_only_latest arguments", async () => {
+    await withEnv({ XDG_STATE_HOME: "/tmp/opencode-monitor-plugin-test" }, async () => {
+      const promptAsync = mock(async () => ({}));
+      const sessionGet = mock(async ({ path }: { path: { id: string } }) => ({
+        data: { id: path.id, directory: "/tmp", projectID: "p1", title: "t", version: "1", time: { created: 0, updated: 0 } },
+      }));
+      const sessionStatus = mock(async () => ({ data: { "root-3": { type: "idle" } } }));
+
+      const plugin = await MonitorPlugin({
+        client: {
+          session: {
+            promptAsync,
+            get: sessionGet,
+            status: sessionStatus,
+          },
+        } as any,
+        project: {} as any,
+        directory: "/tmp",
+        worktree: "/tmp",
+        experimental_workspace: { register() {} },
+        serverUrl: new URL("http://localhost:4096"),
+        $: {} as any,
+      });
+
+      const result = await plugin.tool?.monitor_start.execute(
+        {
+          command: "echo ok",
+          label: "heartbeat",
+          capture: "stdout",
+          outputFormat: "compact",
+          cwd: "/tmp",
+          triggers: [{ type: "idle" }],
+          tagTemplate: "monitor_{id}",
+          lifetime: "persistent",
+          send_only_latest: true,
+        } as any,
+        { sessionID: "root-3", directory: "/tmp" } as any,
+      );
+
+      expect(String(result?.output ?? result)).toContain('"label": "heartbeat"');
+      expect(String(result?.output ?? result)).toContain('"lifetime": "persistent"');
+      expect(String(result?.output ?? result)).toContain('"sendOnlyLatest": true');
+    });
+  });
 });

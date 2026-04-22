@@ -72,11 +72,16 @@ export function decideManualFetch(state: SchedulerState): SchedulerDecision {
 export function commitDelivery(input: {
   state: SchedulerState;
   monitorId: string;
+  sendOnlyLatest?: boolean;
 }): { batch: DeliveryBatch; state: SchedulerState } {
+  const lines =
+    input.sendOnlyLatest && input.state.pendingLines.length > 1
+      ? [input.state.pendingLines[input.state.pendingLines.length - 1]!]
+      : input.state.pendingLines;
   const batch: DeliveryBatch = {
     monitorId: input.monitorId,
     seq: input.state.nextSeq,
-    lines: input.state.pendingLines,
+    lines,
     exit: input.state.pendingExit,
   };
 

@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { EventEmitter } from "events";
 import os from "os";
 import path from "path";
@@ -659,6 +659,155 @@ describe("runtime", () => {
       } catch {
         // best effort cleanup
       }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("persistent monitors write a session manifest with lifetime and latest-only config", async () => {
+    const fakeChild = createFakeChild(31001);
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-session-manifest-"));
+    try {
+      const manager = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync: async () => {},
+        getRootSessionID: async () => "root-manifest",
+        now: () => Date.parse("2026-04-22T01:00:00Z"),
+        spawnProcess: (() => fakeChild) as any,
+      });
+
+      await manager.startMonitor({
+        ownerSessionID: "root-manifest",
+        label: "heartbeat",
+        command: "while true; do echo ok; sleep 1; done",
+        capture: "stdout",
+        cwd: "/tmp",
+        triggers: [{ type: "interval", everyMs: 60_000, deliverWhenEmpty: true }],
+        tagTemplate: "monitor_{id}",
+        lifetime: "persistent",
+        sendOnlyLatest: true,
+      });
+
+      const manifest = JSON.parse(readFileSync(path.join(tempRoot, "root-manifest", "monitors.json"), "utf8"));
+      expect(manifest.version).toBe(1);
+      expect(manifest.monitors).toHaveLength(1);
+      expect(manifest.monitors[0]?.label).toBe("heartbeat");
+      expect(manifest.monitors[0]?.lifetime).toBe("persistent");
+      expect(manifest.monitors[0]?.sendOnlyLatest).toBeTrue();
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("ensureSessionLoaded restores persistent monitors with saved backlog and latest-only policy", async () => {
+    const firstChild = createFakeChild(32001);
+    const secondChild = createFakeChild(32002);
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-restore-"));
+    const promptAsync = mock(async () => {});
+    try {
+      const writer = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync: async () => {},
+        getRootSessionID: async () => "root-restore",
+        now: () => Date.parse("2026-04-22T01:10:00Z"),
+        spawnProcess: (() => firstChild) as any,
+      });
+
+      await writer.startMonitor({
+        ownerSessionID: "root-restore",
+        label: "heartbeat",
+        command: "while true; do echo ok; sleep 1; done",
+        capture: "stdout",
+        cwd: "/tmp",
+        triggers: [{ type: "idle" }],
+        tagTemplate: "monitor_{id}",
+        lifetime: "persistent",
+        sendOnlyLatest: true,
+      });
+      firstChild.stdout.emit("data", Buffer.from("old\nnew\n"));
+      await writer.shutdown();
+
+      const reader = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync,
+        getRootSessionID: async () => "root-restore",
+        now: () => Date.parse("2026-04-22T01:11:00Z"),
+        spawnProcess: (() => secondChild) as any,
+      });
+
+      await reader.ensureSessionLoaded("root-restore");
+      const listed = await reader.listMonitors("root-restore");
+      expect(listed).toHaveLength(1);
+      expect(listed[0]?.label).toBe("heartbeat");
+      expect(listed[0]?.lifetime).toBe("persistent");
+      expect(listed[0]?.sendOnlyLatest).toBeTrue();
+
+      const batches = await reader.fetchPending("root-restore", "heartbeat");
+      expect(batches).toHaveLength(1);
+      expect(batches[0]?.lines.map((line) => line.content)).toEqual(["new"]);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("ensureSessionLoaded rejects a live foreign session lease", async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-lease-"));
+    const foreign = Bun.spawn(["sleep", "5"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      const sessionDir = path.join(tempRoot, "root-lease");
+      mkdirSync(sessionDir, { recursive: true });
+      await Bun.write(
+        path.join(sessionDir, "monitors.json"),
+        JSON.stringify(
+          {
+            version: 1,
+            rootSessionID: "root-lease",
+            monitors: [
+              {
+                ownerSessionID: "root-lease",
+                label: "heartbeat",
+                monitorId: "m2",
+                command: "while true; do echo ok; sleep 1; done",
+                pid: foreign.pid,
+                capture: "stdout",
+                outputFormat: "compact",
+                triggers: [{ type: "idle" }],
+                cwd: "/tmp",
+                env: {},
+                logPath: path.join(sessionDir, "heartbeat.log"),
+                stdoutPath: path.join(sessionDir, "heartbeat.stdout.log"),
+                stderrPath: path.join(sessionDir, "heartbeat.stderr.log"),
+                stdoutOffset: 0,
+                stderrOffset: 0,
+                stdoutRemainder: "",
+                stderrRemainder: "",
+                tagTemplate: "monitor_{id}",
+                lifetime: "persistent",
+                sendOnlyLatest: false,
+                nextSeq: 1,
+                pendingLines: [],
+                status: "running",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+      );
+      await Bun.write(
+        path.join(sessionDir, "monitors.lease.json"),
+        JSON.stringify({ version: 1, rootSessionID: "root-lease", ownerPid: foreign.pid, acquiredAt: Date.now() }),
+      );
+
+      const manager = new MonitorManager({
+        stateRoot: tempRoot,
+        promptAsync: async () => {},
+        getRootSessionID: async () => "root-lease",
+        spawnProcess: (() => createFakeChild(33001)) as any,
+      });
+
+      await expect(manager.ensureSessionLoaded("root-lease")).rejects.toThrow("already owned");
+    } finally {
+      foreign.kill();
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });

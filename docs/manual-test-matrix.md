@@ -61,6 +61,17 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Verify `${XDG_STATE_HOME:-$HOME/.local/state}/opencode-monitor/plugin-debug.jsonl` is created by default.
 - Verify `PLUGIN_OC_MONITOR_DEBUG_LOG=0` suppresses debug-log writes.
 
+14. Persistent monitor resume
+- Verify `lifetime: "persistent"` writes `monitors.json` and `monitors.lease.json` under the root-session state directory.
+- Verify restarting OpenCode and revisiting the same session restores persistent monitors only once.
+- Verify a persistent monitor whose prior PID is gone is auto-restarted on resume.
+- Verify a second live OpenCode process trying to load the same session gets a lease conflict instead of double-owning the monitors.
+
+15. Latest-only grouped delivery
+- Verify `send_only_latest: true` collapses a multi-line burst to the newest line.
+- Verify `monitor_fetch` follows the same collapse behavior.
+- Verify exit events are still included with the kept latest line.
+
 ## Planned Live Scenarios
 
 ### Scenario A: Long interval stream
@@ -101,6 +112,17 @@ Exercise live monitor behavior through the installed tools, with emphasis on lon
 - Start any monitor with default settings.
 - Confirm `plugin-debug.jsonl` appears under the monitor state root and records start, delivery, and exit events.
 - Repeat with `PLUGIN_OC_MONITOR_DEBUG_LOG=0` and expect no new debug entries.
+
+### Scenario I: Persistent resume
+- Start a monitor with `lifetime: "persistent"`.
+- Restart OpenCode or reload the plugin host, then revisit the same session.
+- Expect the monitor to reappear in `monitor_list` and resume capturing output.
+- Repeat with the original monitored PID already gone and expect the command to auto-restart.
+
+### Scenario J: Latest-only heartbeat
+- Start a monitor that emits repetitive lines in quick bursts with `send_only_latest: true`.
+- Trigger a grouped delivery via `idle`, `interval`, or `monitor_fetch`.
+- Expect only the newest pending line to be delivered, plus any exit marker if the process finished.
 
 ## Notes
 
