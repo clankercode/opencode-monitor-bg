@@ -1,12 +1,16 @@
 // @bun
 var __defProp = Object.defineProperty;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: (newValue) => all[name] = () => newValue
+      set: __exportSetter.bind(all, name)
     });
 };
 
@@ -12733,6 +12737,7 @@ class MonitorManager {
         pid: -1,
         capture: input.capture,
         outputFormat: input.outputFormat ?? "compact",
+        agent: input.agent,
         triggers: input.triggers,
         cwd: input.cwd,
         env: input.env ?? {},
@@ -13044,7 +13049,11 @@ class MonitorManager {
         hasExit: Boolean(committed.batch.exit)
       });
       try {
-        await this.promptAsync(runtime.record.ownerSessionID, formatBatchXml({ record: runtime.record, batch: committed.batch }));
+        const text = formatBatchXml({ record: runtime.record, batch: committed.batch });
+        if (runtime.record.agent)
+          await this.promptAsync(runtime.record.ownerSessionID, text, runtime.record.agent);
+        else
+          await this.promptAsync(runtime.record.ownerSessionID, text);
         runtime.scheduler = committed.state;
         runtime.record.nextSeq = committed.state.nextSeq;
         runtime.record.pendingLines = committed.state.pendingLines;
@@ -13290,6 +13299,7 @@ class MonitorManager {
       pendingCount: runtime.scheduler.pendingLines.length,
       capture: runtime.record.capture,
       outputFormat: runtime.record.outputFormat,
+      agent: runtime.record.agent,
       triggers: runtime.record.triggers,
       cwd: runtime.record.cwd,
       logPath: runtime.record.logPath,
@@ -13319,6 +13329,7 @@ class MonitorManager {
         pid: snapshot.pid,
         capture: snapshot.capture,
         outputFormat: snapshot.outputFormat,
+        agent: snapshot.agent,
         triggers: snapshot.triggers,
         cwd: snapshot.cwd,
         env: snapshot.env,
@@ -13370,6 +13381,7 @@ class MonitorManager {
       pid: runtime.record.pid,
       capture: runtime.record.capture,
       outputFormat: runtime.record.outputFormat,
+      agent: runtime.record.agent,
       triggers: runtime.record.triggers,
       cwd: runtime.record.cwd,
       env: runtime.record.env,
@@ -13576,10 +13588,10 @@ var MonitorPlugin = async (ctx) => {
   const stateRoot = defaultStateRoot();
   const manager = new MonitorManager({
     stateRoot,
-    promptAsync: async (sessionID, text) => {
+    promptAsync: async (sessionID, text, agent) => {
       await ctx.client.session.promptAsync({
         path: { id: sessionID },
-        body: { parts: [{ type: "text", text }] },
+        body: { agent, parts: [{ type: "text", text }] },
         throwOnError: true
       });
     },
@@ -13684,6 +13696,7 @@ var MonitorPlugin = async (ctx) => {
             command: args.command,
             capture: args.capture,
             outputFormat: args.outputFormat,
+            agent: context.agent,
             cwd: args.cwd ?? context.directory,
             env: args.env,
             triggers: args.triggers,

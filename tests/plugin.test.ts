@@ -206,6 +206,35 @@ describe("plugin", () => {
     });
   });
 
+  test("promptAsync delivery uses the agent selected when the monitor was started", async () => {
+    await withTempStateRoot(async () => {
+      const sessionStatus = mock(async () => ({ data: { "root-agent": { type: "idle" } } }));
+      const promptAsync = mock(async () => ({}));
+      const { plugin } = await makePlugin({ sessionStatus, promptAsync });
+
+      await plugin.tool?.monitor_start.execute(
+        {
+          command: "printf 'hello\\n'; sleep 5",
+          label: "heartbeat",
+          capture: "stdout",
+          outputFormat: "compact",
+          cwd: "/tmp",
+          triggers: [{ type: "idle" }],
+          tagTemplate: "monitor_{id}",
+        } as any,
+        { sessionID: "root-agent", directory: "/tmp", agent: "plan" } as any,
+      );
+
+      await waitFor(() => promptAsync.mock.calls.length > 0, 500);
+      expect(promptAsync.mock.calls[0]?.[0]?.body?.agent).toBe("plan");
+
+      await plugin.tool?.monitor_kill.execute(
+        { label: "heartbeat", signal: "SIGTERM" } as any,
+        { sessionID: "root-agent", directory: "/tmp" } as any,
+      );
+    });
+  });
+
   test("monitor_list includes the original command and launch metadata", async () => {
     await withTempStateRoot(async () => {
       const sessionStatus = mock(async () => ({ data: { "root-list": { type: "idle" } } }));

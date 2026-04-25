@@ -8,10 +8,10 @@ export const MonitorPlugin: Plugin = async (ctx) => {
   const stateRoot = defaultStateRoot();
   const manager = new MonitorManager({
     stateRoot,
-    promptAsync: async (sessionID, text) => {
+    promptAsync: async (sessionID, text, agent) => {
       await ctx.client.session.promptAsync({
         path: { id: sessionID },
-        body: { parts: [{ type: "text", text }] },
+        body: { agent, parts: [{ type: "text", text }] },
         throwOnError: true,
       });
     },
@@ -131,6 +131,7 @@ export const MonitorPlugin: Plugin = async (ctx) => {
             command: args.command,
             capture: args.capture,
             outputFormat: args.outputFormat,
+            agent: context.agent,
             cwd: args.cwd ?? context.directory,
             env: args.env as Record<string, string> | undefined,
             triggers: args.triggers,

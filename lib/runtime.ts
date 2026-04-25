@@ -48,6 +48,7 @@ export interface StartMonitorInput {
   command: string;
   capture: CaptureMode;
   outputFormat?: OutputFormat;
+  agent?: string;
   cwd: string;
   env?: Record<string, string>;
   triggers: TriggerConfig[];
@@ -68,6 +69,7 @@ export interface MonitorSummary {
   pendingCount: number;
   capture: CaptureMode;
   outputFormat: OutputFormat;
+  agent?: string;
   triggers: TriggerConfig[];
   cwd: string;
   logPath: string;
@@ -87,7 +89,7 @@ function normalizeTruncate(value: number | boolean | undefined): number {
 export interface MonitorManagerOptions {
   now?: () => number;
   stateRoot: string;
-  promptAsync: (sessionID: string, text: string) => Promise<void>;
+  promptAsync: (sessionID: string, text: string, agent?: string) => Promise<void>;
   getRootSessionID: (sessionID: string) => Promise<string>;
   spawnProcess?: typeof spawn;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
@@ -126,7 +128,7 @@ type RuntimeMonitor = {
 export class MonitorManager {
   private readonly now: () => number;
   private readonly stateRoot: string;
-  private readonly promptAsync: (sessionID: string, text: string) => Promise<void>;
+  private readonly promptAsync: (sessionID: string, text: string, agent?: string) => Promise<void>;
   private readonly getRootSessionID: (sessionID: string) => Promise<string>;
   private readonly spawnProcess: typeof spawn;
   private readonly setTimer: (callback: () => void, delay: number) => TimerHandle;
@@ -245,6 +247,7 @@ export class MonitorManager {
         pid: -1,
         capture: input.capture,
         outputFormat: input.outputFormat ?? "compact",
+        agent: input.agent,
         triggers: input.triggers,
         cwd: input.cwd,
         env: input.env ?? {},
@@ -592,7 +595,9 @@ export class MonitorManager {
         hasExit: Boolean(committed.batch.exit),
       });
       try {
-        await this.promptAsync(runtime.record.ownerSessionID, formatBatchXml({ record: runtime.record, batch: committed.batch }));
+        const text = formatBatchXml({ record: runtime.record, batch: committed.batch });
+        if (runtime.record.agent) await this.promptAsync(runtime.record.ownerSessionID, text, runtime.record.agent);
+        else await this.promptAsync(runtime.record.ownerSessionID, text);
         runtime.scheduler = committed.state;
         runtime.record.nextSeq = committed.state.nextSeq;
         runtime.record.pendingLines = committed.state.pendingLines;
@@ -837,6 +842,7 @@ export class MonitorManager {
       pendingCount: runtime.scheduler.pendingLines.length,
       capture: runtime.record.capture,
       outputFormat: runtime.record.outputFormat,
+      agent: runtime.record.agent,
       triggers: runtime.record.triggers,
       cwd: runtime.record.cwd,
       logPath: runtime.record.logPath,
@@ -865,6 +871,7 @@ export class MonitorManager {
         pid: snapshot.pid,
         capture: snapshot.capture,
         outputFormat: snapshot.outputFormat,
+        agent: snapshot.agent,
         triggers: snapshot.triggers,
         cwd: snapshot.cwd,
         env: snapshot.env,
@@ -928,6 +935,7 @@ export class MonitorManager {
       pid: runtime.record.pid,
       capture: runtime.record.capture,
       outputFormat: runtime.record.outputFormat,
+      agent: runtime.record.agent,
       triggers: runtime.record.triggers,
       cwd: runtime.record.cwd,
       env: runtime.record.env,

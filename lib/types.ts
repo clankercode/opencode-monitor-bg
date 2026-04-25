@@ -37,6 +37,7 @@ export interface MonitorRecord {
   pid: number;
   capture: CaptureMode;
   outputFormat: OutputFormat;
+  agent?: string;
   triggers: TriggerConfig[];
   cwd: string;
   env: Record<string, string>;
@@ -99,6 +100,7 @@ export interface PersistentMonitorSnapshot {
   pid: number;
   capture: CaptureMode;
   outputFormat: OutputFormat;
+  agent?: string;
   triggers: TriggerConfig[];
   cwd: string;
   env: Record<string, string>;
